@@ -534,122 +534,7 @@ static DBusMessage *media_player_previous(DBusConnection *conn,
 
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static DBusMessage *media_player_press_fast_forward(DBusConnection *conn,
-						DBusMessage *msg, void *data)
-{
-	DBG("+");
-	struct media_player *mp = data;
-	struct player_callback *cb = mp->cb;
-	int err;
 
-	if (cb->cbs->press_fast_forward == NULL)
-		return btd_error_not_supported(msg);
-
-	err = cb->cbs->press_fast_forward(mp, cb->user_data);
-	if (err < 0)
-		return btd_error_failed(msg, strerror(-err));
-
-	DBG("-");
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-
-static DBusMessage *media_player_release_fast_forward(DBusConnection *conn,
-						DBusMessage *msg, void *data)
-{
-	DBG("+");
-	struct media_player *mp = data;
-	struct player_callback *cb = mp->cb;
-	int err;
-
-	if (cb->cbs->release_fast_forward == NULL)
-		return btd_error_not_supported(msg);
-
-	err = cb->cbs->release_fast_forward(mp, cb->user_data);
-	if (err < 0)
-		return btd_error_failed(msg, strerror(-err));
-
-	DBG("-");
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-
-static DBusMessage *media_player_press_rewind(DBusConnection *conn, DBusMessage *msg,
-								void *data)
-{
-	DBG("+");
-	struct media_player *mp = data;
-	struct player_callback *cb = mp->cb;
-	int err;
-
-	if (cb->cbs->press_rewind == NULL)
-		return btd_error_not_supported(msg);
-
-	err = cb->cbs->press_rewind(mp, cb->user_data);
-	if (err < 0)
-		return btd_error_failed(msg, strerror(-err));
-
-	DBG("-");
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-
-static DBusMessage *media_player_release_rewind(DBusConnection *conn, DBusMessage *msg,
-								void *data)
-{
-	DBG("+");
-	struct media_player *mp = data;
-	struct player_callback *cb = mp->cb;
-	int err;
-
-	if (cb->cbs->release_rewind == NULL)
-		return btd_error_not_supported(msg);
-
-	err = cb->cbs->release_rewind(mp, cb->user_data);
-	if (err < 0)
-		return btd_error_failed(msg, strerror(-err));
-
-	DBG("-");
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-
-static DBusMessage *media_player_volume_up(DBusConnection *conn, DBusMessage *msg,
-								void *data)
-{
-	DBG("+");
-	struct media_player *mp = data;
-	struct player_callback *cb = mp->cb;
-	int err;
-
-	if (cb->cbs->volume_up == NULL)
-		return btd_error_not_supported(msg);
-
-	err = cb->cbs->volume_up(mp, cb->user_data);
-	if (err < 0)
-		return btd_error_failed(msg, strerror(-err));
-
-	DBG("-");
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-
-static DBusMessage *media_player_volume_down(DBusConnection *conn, DBusMessage *msg,
-								void *data)
-{
-	DBG("+");
-	struct media_player *mp = data;
-	struct player_callback *cb = mp->cb;
-	int err;
-
-	if (cb->cbs->volume_down == NULL)
-		return btd_error_not_supported(msg);
-
-	err = cb->cbs->volume_down(mp, cb->user_data);
-	if (err < 0)
-		return btd_error_failed(msg, strerror(-err));
-
-	DBG("-");
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-
-#else
 static DBusMessage *media_player_fast_forward(DBusConnection *conn,
 						DBusMessage *msg, void *data)
 {
@@ -683,7 +568,7 @@ static DBusMessage *media_player_rewind(DBusConnection *conn, DBusMessage *msg,
 
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
-#endif
+
 static void parse_folder_list(gpointer data, gpointer user_data)
 {
 	struct media_item *item = data;
@@ -816,17 +701,8 @@ static const GDBusMethodTable media_player_methods[] = {
 	{ GDBUS_METHOD("Stop", NULL, NULL, media_player_stop) },
 	{ GDBUS_METHOD("Next", NULL, NULL, media_player_next) },
 	{ GDBUS_METHOD("Previous", NULL, NULL, media_player_previous) },
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	{ GDBUS_METHOD("PressFastForward", NULL, NULL, media_player_press_fast_forward) },
-	{ GDBUS_METHOD("ReleaseFastForward", NULL, NULL, media_player_release_fast_forward) },
-	{ GDBUS_METHOD("PressRewind", NULL, NULL, media_player_press_rewind) },
-	{ GDBUS_METHOD("ReleaseRewind", NULL, NULL, media_player_release_rewind) },
-	{ GDBUS_METHOD("VolumeUp", NULL, NULL, media_player_volume_up) },
-	{ GDBUS_METHOD("VolumeDown", NULL, NULL, media_player_volume_down) },
-#else
 	{ GDBUS_METHOD("FastForward", NULL, NULL, media_player_fast_forward) },
 	{ GDBUS_METHOD("Rewind", NULL, NULL, media_player_rewind) },
-#endif
 	{ }
 };
 
@@ -1491,37 +1367,18 @@ void media_player_set_metadata(struct media_player *mp,
 				struct media_item *item, const char *key,
 				void *data, size_t len)
 {
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	char *value;
-	char *end, *temp;
-#else
 	char *value, *curval;
-#endif
 
 	value = g_strndup(data, len);
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	temp = value;
-	while (g_utf8_validate(temp, -1, (const gchar **)&end) == FALSE) {
-		temp = g_utf8_find_next_char(end, NULL);
-		if (temp == NULL) {
-			*end = '\0';
-			break;
-		}
-		strcpy(end, temp);
-		temp = end;
-	}
-#endif
-
 	DBG("%s: %s", key, value);
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	curval = g_hash_table_lookup(mp->track, key);
 	if (g_strcmp0(curval, value) == 0) {
 		g_free(value);
 		return;
 	}
-#endif
+
 	if (mp->process_id == 0) {
 		g_hash_table_remove_all(mp->track);
 		mp->process_id = g_idle_add(process_metadata_changed, mp);
@@ -1943,11 +1800,11 @@ static struct media_item *media_folder_create_item(struct media_player *mp,
 	item->player = mp;
 	item->uid = uid;
 
-	if (!uid && name[0] == '/')
-		item->path = g_strdup_printf("%s%s", mp->path, name);
-	else
+	if (uid > 0)
 		item->path = g_strdup_printf("%s/item%" PRIu64 "",
 						folder->item->path, uid);
+	else
+		item->path = g_strdup_printf("%s%s", mp->path, name);
 
 	item->name = g_strdup(name);
 	item->type = type;
@@ -1982,24 +1839,6 @@ struct media_item *media_player_create_item(struct media_player *mp,
 {
 	return media_folder_create_item(mp, mp->scope, name, type, uid);
 }
-
-#if 0
-static struct media_folder *
-media_player_find_folder_by_uid(struct media_player *mp, uint64_t uid)
-{
-	struct media_folder *folder = mp->scope;
-	GSList *l;
-
-	for (l = folder->subfolders; l; l = l->next) {
-		struct media_folder *folder = l->data;
-
-		if (folder->item->uid == uid)
-			return folder;
-	}
-
-	return NULL;
-}
-#endif
 
 struct media_item *media_player_create_folder(struct media_player *mp,
 						const char *name,

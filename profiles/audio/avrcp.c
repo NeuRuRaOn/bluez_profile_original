@@ -139,13 +139,9 @@
 #define AVRCP_CHARSET_UTF8		106
 
 #define AVRCP_BROWSING_TIMEOUT		1
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#define AVRCP_CT_VERSION		0x0104
-#define AVRCP_TG_VERSION		0x0103
-#else
 #define AVRCP_CT_VERSION		0x0106
 #define AVRCP_TG_VERSION		0x0105
-#endif
+
 #define AVRCP_SCOPE_MEDIA_PLAYER_LIST			0x00
 #define AVRCP_SCOPE_MEDIA_PLAYER_VFS			0x01
 #define AVRCP_SCOPE_SEARCH				0x02
@@ -282,10 +278,6 @@ struct avrcp {
 	uint8_t transaction;
 	uint8_t transaction_events[AVRCP_EVENT_LAST + 1];
 	struct pending_pdu *pending_pdu;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint16_t remote_supported_events;
-	uint32_t playback_status_id;
-#endif
 };
 
 struct passthrough_handler {
@@ -303,15 +295,6 @@ struct control_pdu_handler {
 static GSList *servers = NULL;
 static unsigned int avctp_id = 0;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
-static uint16_t adapter_avrcp_tg_ver = 0;
-#endif
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
-static uint16_t adapter_avrcp_ct_ver = 0;
-#endif
-#endif
-
 /* Default feature bit mask for media player as per avctp.c:key_map */
 static const uint8_t features[16] = {
 				0xF8, 0xBF, 0xFF, 0xBF, 0x1F,
@@ -326,13 +309,6 @@ static uint32_t company_ids[] = {
 
 static void avrcp_register_notification(struct avrcp *session, uint8_t event);
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static GList *player_list_settings(struct avrcp_player *player);
-void avrcp_stop_position_timer(void);
-unsigned int pos_timer_id = 0;
-#endif
-
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
 static sdp_record_t *avrcp_ct_record(void)
 {
 	sdp_list_t *svclass_id, *pfseq, *apseq, *apseq1, *root;
@@ -342,23 +318,12 @@ static sdp_record_t *avrcp_ct_record(void)
 	sdp_record_t *record;
 	sdp_data_t *psm[2], *version, *features;
 	uint16_t lp = AVCTP_CONTROL_PSM, ap = AVCTP_BROWSING_PSM;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint16_t avctp_ver = 0x0104;
-	uint16_t feat = 0;
-#ifdef ENABLE_AVRCP_CATEGORY1
-	feat = AVRCP_FEATURE_CATEGORY_1;
-#endif
-#ifdef ENABLE_AVRCP_CATEGORY2
-	feat = feat | AVRCP_FEATURE_CATEGORY_2;
-#endif
-#else
 	uint16_t avctp_ver = 0x0103;
-	uint16_t feat = (AVRCP_FEATURE_CATEGORY_1 |
+	uint16_t feat = ( AVRCP_FEATURE_CATEGORY_1 |
 						AVRCP_FEATURE_CATEGORY_2 |
 						AVRCP_FEATURE_CATEGORY_3 |
 						AVRCP_FEATURE_CATEGORY_4 |
 						AVRCP_FEATURE_BROWSING);
-#endif
 
 	record = sdp_record_alloc();
 	if (!record)
@@ -409,9 +374,6 @@ static sdp_record_t *avrcp_ct_record(void)
 	/* Bluetooth Profile Descriptor List */
 	sdp_uuid16_create(&profile[0].uuid, AV_REMOTE_PROFILE_ID);
 	profile[0].version = AVRCP_CT_VERSION;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	adapter_avrcp_ct_ver = AVRCP_CT_VERSION;
-#endif
 	pfseq = sdp_list_append(NULL, &profile[0]);
 	sdp_set_profile_descs(record, pfseq);
 
@@ -437,9 +399,7 @@ static sdp_record_t *avrcp_ct_record(void)
 
 	return record;
 }
-#endif
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
 static sdp_record_t *avrcp_tg_record(void)
 {
 	sdp_list_t *svclass_id, *pfseq, *apseq, *root, *apseq_browsing;
@@ -448,31 +408,17 @@ static sdp_record_t *avrcp_tg_record(void)
 	sdp_list_t *aproto_control, *proto_control[2];
 	sdp_record_t *record;
 	sdp_data_t *psm_control, *version, *features, *psm_browsing;
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
-	sdp_list_t *aproto_browsing;
-#endif
-	sdp_list_t *proto_browsing[2] = {0};
+	sdp_list_t *aproto_browsing, *proto_browsing[2] = {0};
 	uint16_t lp = AVCTP_CONTROL_PSM;
 	uint16_t lp_browsing = AVCTP_BROWSING_PSM;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint16_t avctp_ver = 0x0104;
-	uint16_t feat = 0;
-#ifdef ENABLE_AVRCP_CATEGORY1
-	feat = AVRCP_FEATURE_CATEGORY_1 |
-		AVRCP_FEATURE_PLAYER_SETTINGS;
-#endif
-#ifdef ENABLE_AVRCP_CATEGORY2
-	feat = feat | AVRCP_FEATURE_CATEGORY_2;
-#endif
-#else
 	uint16_t avctp_ver = 0x0103;
-	uint16_t feat = (AVRCP_FEATURE_CATEGORY_1 |
+	uint16_t feat = ( AVRCP_FEATURE_CATEGORY_1 |
 					AVRCP_FEATURE_CATEGORY_2 |
 					AVRCP_FEATURE_CATEGORY_3 |
 					AVRCP_FEATURE_CATEGORY_4 |
 					AVRCP_FEATURE_BROWSING |
-					AVRCP_FEATURE_PLAYER_SETTINGS);
-#endif
+					AVRCP_FEATURE_PLAYER_SETTINGS );
+
 	record = sdp_record_alloc();
 	if (!record)
 		return NULL;
@@ -510,17 +456,12 @@ static sdp_record_t *avrcp_tg_record(void)
 	proto_browsing[1] = sdp_list_append(proto_browsing[1], version);
 	apseq_browsing = sdp_list_append(apseq_browsing, proto_browsing[1]);
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	aproto_browsing = sdp_list_append(NULL, apseq_browsing);
 	sdp_set_add_access_protos(record, aproto_browsing);
-#endif
 
 	/* Bluetooth Profile Descriptor List */
 	sdp_uuid16_create(&profile[0].uuid, AV_REMOTE_PROFILE_ID);
 	profile[0].version = AVRCP_TG_VERSION;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	adapter_avrcp_tg_ver = AVRCP_TG_VERSION;
-#endif
 	pfseq = sdp_list_append(NULL, &profile[0]);
 	sdp_set_profile_descs(record, pfseq);
 
@@ -533,9 +474,7 @@ static sdp_record_t *avrcp_tg_record(void)
 	sdp_list_free(proto_browsing[0], NULL);
 	sdp_list_free(proto_browsing[1], NULL);
 	sdp_list_free(apseq_browsing, NULL);
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	sdp_list_free(aproto_browsing, NULL);
-#endif
 
 	free(psm_control);
 	free(version);
@@ -549,7 +488,6 @@ static sdp_record_t *avrcp_tg_record(void)
 
 	return record;
 }
-#endif
 
 static unsigned int attr_get_max_val(uint8_t attr)
 {
@@ -557,17 +495,9 @@ static unsigned int attr_get_max_val(uint8_t attr)
 	case AVRCP_ATTRIBUTE_EQUALIZER:
 		return AVRCP_EQUALIZER_ON;
 	case AVRCP_ATTRIBUTE_REPEAT_MODE:
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		return AVRCP_REPEAT_MODE_ALL;
-#else
 		return AVRCP_REPEAT_MODE_GROUP;
-#endif
 	case AVRCP_ATTRIBUTE_SHUFFLE:
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		return AVRCP_SHUFFLE_ALL;
-#else
 		return AVRCP_SHUFFLE_GROUP;
-#endif
 	case AVRCP_ATTRIBUTE_SCAN:
 		return AVRCP_SCAN_GROUP;
 	}
@@ -746,10 +676,6 @@ void avrcp_player_event(struct avrcp_player *player, uint8_t id,
 	GSList *l;
 	int attr;
 	int val;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint32_t *position_val = NULL;
-	GList *settings;
-#endif
 
 	if (player->sessions == NULL)
 		return;
@@ -789,24 +715,6 @@ void avrcp_player_event(struct avrcp_player *player, uint8_t id,
 		break;
 	case AVRCP_EVENT_SETTINGS_CHANGED:
 		size = 2;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		settings = player_list_settings(player);
-		pdu->params[1] = g_list_length(settings);
-		for (; settings; settings = settings->next) {
-			const char *key = settings->data;
-
-			attr = attr_to_val(key);
-			if (attr < 0)
-				continue;
-
-			val = player_get_setting(player, attr);
-			if (val < 0)
-				continue;
-
-			pdu->params[size++] = attr;
-			pdu->params[size++] = val;
-		}
-#else
 		pdu->params[1] = 1;
 
 		attr = attr_to_val(data);
@@ -819,19 +727,7 @@ void avrcp_player_event(struct avrcp_player *player, uint8_t id,
 
 		pdu->params[size++] = attr;
 		pdu->params[size++] = val;
-#endif /* __TIZEN__PATCH__ */
 		break;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	case AVRCP_EVENT_PLAYBACK_POS_CHANGED:
-		size = 5;
-		position_val = (uint32_t *) data;
-		*position_val = (*position_val & 0x000000ff) << 24 |
-				 (*position_val & 0x0000ff00) << 8 |
-				 (*position_val & 0x00ff0000) >> 8 |
-				 (*position_val & 0xff000000) >> 24;
-		memcpy(&pdu->params[1], position_val, sizeof(uint32_t));
-		break;
-#endif
 	case AVRCP_EVENT_ADDRESSED_PLAYER_CHANGED:
 		size = 5;
 		memcpy(&pdu->params[1], &player->id, sizeof(uint16_t));
@@ -847,17 +743,6 @@ void avrcp_player_event(struct avrcp_player *player, uint8_t id,
 
 done:
 	pdu->params_len = htons(size);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (id == AVRCP_EVENT_PLAYBACK_POS_CHANGED &&
-			pos_timer_id > 0) {
-		/* Remove the timer function which was added for register notification.
-		 * As we are sending changed event eariler then time interval.
-		 */
-		DBG("Removing the timer function added by register notification");
-		g_source_remove(pos_timer_id);
-		pos_timer_id = 0;
-	}
-#endif
 
 	for (l = player->sessions; l; l = l->next) {
 		struct avrcp *session = l->data;
@@ -1038,10 +923,8 @@ static const char *attrval_to_str(uint8_t attr, uint8_t value)
 			return "singletrack";
 		case AVRCP_REPEAT_MODE_ALL:
 			return "alltracks";
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 		case AVRCP_REPEAT_MODE_GROUP:
 			return "group";
-#endif
 		}
 
 		break;
@@ -1053,10 +936,8 @@ static const char *attrval_to_str(uint8_t attr, uint8_t value)
 			return "off";
 		case AVRCP_SCAN_ALL:
 			return "alltracks";
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 		case AVRCP_SCAN_GROUP:
 			return "group";
-#endif
 		}
 
 		break;
@@ -1548,16 +1429,6 @@ static GList *player_list_settings(struct avrcp_player *player)
 	return player->cb->list_settings(player->user_data);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static uint32_t player_get_playback_position(struct avrcp_player *player)
-{
-	if (player == NULL)
-		return UINT32_MAX;
-
-	return player->cb->get_position(player->user_data);
-}
-#endif
-
 static bool avrcp_handle_play(struct avrcp *session)
 {
 	struct avrcp_player *player = target_get_player(session);
@@ -1639,33 +1510,6 @@ static bool handle_passthrough(struct avctp *conn, uint8_t op, bool pressed,
 	return handler->func(session);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-void avrcp_stop_position_timer(void)
-{
-	if (pos_timer_id > 0) {
-		DBG("Removing position timer id");
-		g_source_remove(pos_timer_id);
-		pos_timer_id = 0;
-	}
-}
-gboolean send_playback_position_event(gpointer user_data)
-{
-	struct avrcp_player *player = user_data;
-	uint32_t playback_position;
-	uint8_t play_status;
-
-	play_status = player_get_status(player);
-	if (play_status != AVRCP_PLAY_STATUS_PLAYING)
-		return FALSE;
-
-	playback_position = player_get_playback_position(player);
-	pos_timer_id = 0;
-	avrcp_player_event(player, AVRCP_EVENT_PLAYBACK_POS_CHANGED,
-						&playback_position);
-	return FALSE;
-}
-#endif
-
 static uint8_t avrcp_handle_register_notification(struct avrcp *session,
 						struct avrcp_header *pdu,
 						uint8_t transaction)
@@ -1674,11 +1518,6 @@ static uint8_t avrcp_handle_register_notification(struct avrcp *session,
 	struct btd_device *dev = session->dev;
 	uint16_t len = ntohs(pdu->params_len);
 	uint64_t uid;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint32_t playback_interval;
-	uint32_t playback_position;
-	uint8_t play_status;
-#endif
 	GList *settings;
 
 	/*
@@ -1750,40 +1589,6 @@ static uint8_t avrcp_handle_register_notification(struct avrcp *session,
 		len = 2;
 
 		break;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	case AVRCP_EVENT_PLAYBACK_POS_CHANGED:
-		len = 5;
-
-		/* time interval in seconds at which the change in playback position
-		shall be notified */
-		memcpy(&playback_interval, &pdu->params[1], sizeof(uint32_t));
-		playback_interval = ((playback_interval>>24)&0xff) |
-				    ((playback_interval<<8)&0xff0000) |
-				    ((playback_interval>>8)&0xff00) |
-				    ((playback_interval<<24)&0xff000000);
-
-		play_status = player_get_status(player);
-
-		if (play_status != AVRCP_PLAY_STATUS_PLAYING) {
-			DBG("Play Pos Changed Event is skipped(%d)", play_status);
-		} else {
-			DBG("Playback interval : %d secs", playback_interval);
-			pos_timer_id = g_timeout_add_seconds(
-					playback_interval,
-					send_playback_position_event, player);
-		}
-
-		/* retrieve current playback position for interim response */
-		playback_position = player_get_playback_position(player);
-		playback_position = (playback_position & 0x000000ff) << 24 |
-				(playback_position & 0x0000ff00) << 8 |
-				(playback_position & 0x00ff0000) >> 8 |
-				(playback_position & 0xff000000) >> 24;
-		memcpy(&pdu->params[1], &playback_position, sizeof(uint32_t));
-
-		break;
-#endif
-
 	default:
 		/* All other events are not supported yet */
 		goto err;
@@ -2281,12 +2086,6 @@ static gboolean avrcp_get_play_status_rsp(struct avctp *conn, uint8_t code,
 {
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct media_player *mp = player->user_data;
 	struct avrcp_header *pdu = (void *) operands;
 	uint32_t duration;
@@ -2351,12 +2150,6 @@ static gboolean avrcp_player_value_rsp(struct avctp *conn, uint8_t code,
 {
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct media_player *mp = player->user_data;
 	struct avrcp_header *pdu = (void *) operands;
 	uint8_t count;
@@ -2517,11 +2310,6 @@ static gboolean avrcp_get_element_attributes_rsp(struct avctp *conn,
 	struct avrcp_header *pdu = (void *) operands;
 	uint8_t count;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	if (code == AVC_CTYPE_REJECTED)
 		return FALSE;
 
@@ -2634,12 +2422,6 @@ static struct media_item *parse_media_element(struct avrcp *session,
 	}
 
 	player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return NULL;
-#endif
-
 	mp = player->user_data;
 
 	item = media_player_create_item(mp, name, PLAYER_ITEM_TYPE_AUDIO, uid);
@@ -2655,12 +2437,6 @@ static struct media_item *parse_media_folder(struct avrcp *session,
 					uint8_t *operands, uint16_t len)
 {
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return NULL;
-#endif
-
 	struct media_player *mp = player->user_data;
 	struct media_item *item;
 	uint16_t namelen;
@@ -2699,12 +2475,6 @@ static gboolean avrcp_list_items_rsp(struct avctp *conn, uint8_t *operands,
 	struct avrcp_browsing_header *pdu = (void *) operands;
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct pending_list_items *p = player->p;
 	uint16_t count;
 	uint64_t items;
@@ -2793,11 +2563,6 @@ static void avrcp_list_items(struct avrcp *session, uint32_t start,
 	uint16_t length = AVRCP_BROWSING_HEADER_LENGTH + 10;
 	uint32_t attribute;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	memset(buf, 0, sizeof(buf));
 
 	pdu->pdu_id = AVRCP_GET_FOLDER_ITEMS;
@@ -2828,12 +2593,6 @@ static gboolean avrcp_change_path_rsp(struct avctp *conn,
 	struct avrcp_browsing_header *pdu = (void *) operands;
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct media_player *mp = player->user_data;
 	int ret;
 
@@ -2874,12 +2633,6 @@ static gboolean avrcp_set_browsed_player_rsp(struct avctp *conn,
 {
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct media_player *mp = player->user_data;
 	struct avrcp_browsing_header *pdu = (void *) operands;
 	uint32_t items;
@@ -2951,12 +2704,6 @@ static gboolean avrcp_get_item_attributes_rsp(struct avctp *conn,
 {
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct avrcp_browsing_header *pdu = (void *) operands;
 	uint8_t count;
 
@@ -2989,11 +2736,6 @@ static void avrcp_get_item_attributes(struct avrcp *session, uint64_t uid)
 	struct avrcp_player *player = session->controller->player;
 	uint8_t buf[AVRCP_BROWSING_HEADER_LENGTH + 12];
 	struct avrcp_browsing_header *pdu = (void *) buf;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
 
 	memset(buf, 0, sizeof(buf));
 
@@ -3065,11 +2807,6 @@ static gboolean avrcp_set_addressed_player_rsp(struct avctp *conn, uint8_t code,
 
 	if (!pdu || code != AVC_CTYPE_ACCEPTED)
 		return FALSE;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
 
 	player->addressed = true;
 
@@ -3184,46 +2921,6 @@ static int ct_press(struct avrcp_player *player, uint8_t op)
 	return 0;
 }
 
-#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
-static int ct_press_send_atonce(struct avrcp_player *player, uint8_t op)
-{
-	int err;
-	struct avrcp *session;
-
-	session = player->sessions->data;
-	if (session == NULL)
-		return -ENOTCONN;
-
-	set_ct_player(session, player);
-
-	err = avctp_send_passthrough_send_fast(session->conn, op);
-	if (err < 0)
-		return err;
-
-	return 0;
-}
-#endif
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static int ct_release(struct avrcp_player *player, uint8_t op)
-{
-	DBG("+");
-	int err;
-	struct avrcp *session;
-
-	session = player->sessions->data;
-	if (session == NULL)
-		return -ENOTCONN;
-
-	err = avctp_send_release_passthrough(session->conn, op);
-	if (err < 0)
-		return err;
-
-	DBG("-");
-	return 0;
-}
-#endif
-
 static int ct_play(struct media_player *mp, void *user_data)
 {
 	struct avrcp_player *player = user_data;
@@ -3259,61 +2956,6 @@ static int ct_previous(struct media_player *mp, void *user_data)
 	return ct_press(player, AVC_BACKWARD);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static int ct_press_fast_forward(struct media_player *mp, void *user_data)
-{
-	DBG("+");
-	struct avrcp_player *player = user_data;
-
-	DBG("-");
-	return ct_press(player, AVC_FAST_FORWARD);
-}
-
-static int ct_release_fast_forward(struct media_player *mp, void *user_data)
-{
-	DBG("+");
-	struct avrcp_player *player = user_data;
-
-	DBG("-");
-	return ct_release(player, AVC_FAST_FORWARD);
-}
-
-static int ct_press_rewind(struct media_player *mp, void *user_data)
-{
-	DBG("+");
-	struct avrcp_player *player = user_data;
-
-	DBG("-");
-	return ct_press(player, AVC_REWIND);
-}
-
-static int ct_release_rewind(struct media_player *mp, void *user_data)
-{
-	DBG("+");
-	struct avrcp_player *player = user_data;
-
-	DBG("-");
-	return ct_release(player, AVC_REWIND);
-}
-
-static int ct_volume_up(struct media_player *mp, void *user_data)
-{
-	DBG("+");
-	struct avrcp_player *player = user_data;
-
-	DBG("-");
-	return ct_press(player, AVC_VOLUME_UP);
-}
-
-static int ct_volume_down(struct media_player *mp, void *user_data)
-{
-	DBG("+");
-	struct avrcp_player *player = user_data;
-
-	DBG("-");
-	return ct_press(player, AVC_VOLUME_DOWN);
-}
-#else
 static int ct_fast_forward(struct media_player *mp, void *user_data)
 {
 	struct avrcp_player *player = user_data;
@@ -3327,7 +2969,6 @@ static int ct_rewind(struct media_player *mp, void *user_data)
 
 	return ct_press(player, AVC_REWIND);
 }
-#endif
 
 static int ct_list_items(struct media_player *mp, const char *name,
 				uint32_t start, uint32_t end, void *user_data)
@@ -3368,11 +3009,6 @@ static void avrcp_change_path(struct avrcp *session, uint8_t direction,
 	uint8_t buf[AVRCP_BROWSING_HEADER_LENGTH + 11];
 	struct avrcp_browsing_header *pdu = (void *) buf;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	memset(buf, 0, sizeof(buf));
 	put_be16(player->uid_counter, &pdu->params[0]);
 	pdu->params[2] = direction;
@@ -3409,12 +3045,6 @@ static gboolean avrcp_search_rsp(struct avctp *conn, uint8_t *operands,
 	struct avrcp_browsing_header *pdu = (void *) operands;
 	struct avrcp *session = (void *) user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return FALSE;
-#endif
-
 	struct media_player *mp = player->user_data;
 	int ret;
 
@@ -3514,11 +3144,6 @@ static void avrcp_play_item(struct avrcp *session, uint64_t uid)
 	struct avrcp_header *pdu = (void *) buf;
 	uint16_t length;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	memset(buf, 0, sizeof(buf));
 
 	set_company_id(pdu->company_id, IEEEID_BTSIG);
@@ -3568,11 +3193,6 @@ static void avrcp_add_to_nowplaying(struct avrcp *session, uint64_t uid)
 	struct avrcp_header *pdu = (void *) buf;
 	uint16_t length;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	memset(buf, 0, sizeof(buf));
 
 	set_company_id(pdu->company_id, IEEEID_BTSIG);
@@ -3620,12 +3240,6 @@ static gboolean avrcp_get_total_numberofitems_rsp(struct avctp *conn,
 	struct avrcp_browsing_header *pdu = (void *) operands;
 	struct avrcp *session = user_data;
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return EINVAL;
-#endif
-
 	struct media_player *mp = player->user_data;
 	uint32_t num_of_items = 0;
 
@@ -3654,11 +3268,6 @@ static void avrcp_get_total_numberofitems(struct avrcp *session)
 	uint8_t buf[AVRCP_BROWSING_HEADER_LENGTH + 7];
 	struct avrcp_player *player = session->controller->player;
 	struct avrcp_browsing_header *pdu = (void *) buf;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
 
 	memset(buf, 0, sizeof(buf));
 
@@ -3704,17 +3313,8 @@ static const struct media_player_callback ct_cbs = {
 	.stop		= ct_stop,
 	.next		= ct_next,
 	.previous	= ct_previous,
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	.press_fast_forward	= ct_press_fast_forward,
-	.release_fast_forward	= ct_release_fast_forward,
-	.press_rewind		= ct_press_rewind,
-	.release_rewind		= ct_release_rewind,
-	.volume_up		= ct_volume_up,
-	.volume_down		= ct_volume_down,
-#else
 	.fast_forward	= ct_fast_forward,
 	.rewind		= ct_rewind,
-#endif
 	.list_items	= ct_list_items,
 	.change_folder	= ct_change_folder,
 	.search		= ct_search,
@@ -3835,10 +3435,6 @@ static void player_destroy(gpointer data)
 
 	if (player->destroy)
 		player->destroy(player->user_data);
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	avrcp_stop_position_timer();
-#endif
 
 	if (player->changed_id > 0)
 		g_source_remove(player->changed_id);
@@ -3963,12 +3559,6 @@ static void avrcp_status_changed(struct avrcp *session,
 						struct avrcp_header *pdu)
 {
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	struct media_player *mp = player->user_data;
 	uint8_t value;
 	const char *curval, *strval;
@@ -3977,15 +3567,6 @@ static void avrcp_status_changed(struct avrcp *session,
 
 	curval = media_player_get_status(mp);
 	strval = status_to_string(value);
-
-#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
-	DBG("AVRCP status changed to : %s", strval);
-
-	if (value == AVRCP_PLAY_STATUS_PAUSED)
-		media_transport_set_stream_status(session->dev, true);
-	else if ( value == AVRCP_PLAY_STATUS_PLAYING)
-		media_transport_set_stream_status(session->dev, false);
-#endif
 
 	if (g_strcmp0(curval, strval) == 0)
 		return;
@@ -3999,11 +3580,6 @@ static void avrcp_track_changed(struct avrcp *session,
 {
 	if (session->browsing_id) {
 		struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
 		player->uid = get_be64(&pdu->params[1]);
 		avrcp_get_item_attributes(session, player->uid);
 	} else
@@ -4014,12 +3590,6 @@ static void avrcp_playback_pos_changed(struct avrcp *session,
 						struct avrcp_header *pdu)
 {
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	struct media_player *mp = player->user_data;
 	uint32_t position;
 
@@ -4031,12 +3601,6 @@ static void avrcp_setting_changed(struct avrcp *session,
 						struct avrcp_header *pdu)
 {
 	struct avrcp_player *player = session->controller->player;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	struct media_player *mp = player->user_data;
 	uint8_t count = pdu->params[1];
 	int i;
@@ -4093,11 +3657,6 @@ static void avrcp_uids_changed(struct avrcp *session, struct avrcp_header *pdu)
 {
 	struct avrcp_player *player = session->controller->player;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!player)
-		return;
-#endif
-
 	player->uid_counter = get_be16(&pdu->params[1]);
 }
 
@@ -4132,8 +3691,9 @@ static gboolean avrcp_handle_event(struct avctp *conn, uint8_t code,
 
 	event = pdu->params[0];
 
-	if (code == AVC_CTYPE_CHANGED)
+	if (code == AVC_CTYPE_CHANGED) {
 		goto changed;
+	}
 
 	switch (event) {
 	case AVRCP_EVENT_VOLUME_CHANGED:
@@ -4203,40 +3763,6 @@ static void avrcp_register_notification(struct avrcp *session, uint8_t event)
 					avrcp_handle_event, session);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static char *avrcp_event_to_string(uint8_t event)
-{
-
-	switch (event) {
-	case AVRCP_EVENT_STATUS_CHANGED:
-		return "AVRCP EVENT STATUS CHANGED";
-	case AVRCP_EVENT_TRACK_CHANGED:
-		return "AVRCP EVENT TRACK CHANGED";
-	case AVRCP_EVENT_SETTINGS_CHANGED:
-		return "AVRCP EVENT SETTINGS CHANGED";
-	case AVRCP_EVENT_ADDRESSED_PLAYER_CHANGED:
-		return "AVRCP EVENT ADDRESSED PLAYER CHANGED";
-	case AVRCP_EVENT_UIDS_CHANGED:
-		return "AVRCP EVENT UIDS CHANGED";
-	case AVRCP_EVENT_AVAILABLE_PLAYERS_CHANGED:
-		return "AVRCP EVENT AVAILABLE PLAYERS CHANGED";
-	case AVRCP_EVENT_VOLUME_CHANGED:
-		return "AVRCP EVENT VOLUME CHANGED";
-	default:
-		return "Unknown Event";
-	}
-}
-
-static gboolean avrcp_get_playback_status(gpointer user_data)
-{
-	struct avrcp *session = user_data;
-
-	avrcp_get_play_status(session);
-
-	return TRUE;
-}
-#endif
-
 static gboolean avrcp_get_capabilities_resp(struct avctp *conn, uint8_t code,
 					uint8_t subunit, uint8_t transaction,
 					uint8_t *operands, size_t operand_count,
@@ -4264,15 +3790,12 @@ static gboolean avrcp_get_capabilities_resp(struct avctp *conn, uint8_t code,
 		uint8_t event = pdu->params[1 + count];
 
 		events |= (1 << event);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		DBG("Supported Event %s", avrcp_event_to_string(event));
-#endif
+
 		switch (event) {
 		case AVRCP_EVENT_STATUS_CHANGED:
 		case AVRCP_EVENT_TRACK_CHANGED:
 		case AVRCP_EVENT_PLAYBACK_POS_CHANGED:
 		case AVRCP_EVENT_SETTINGS_CHANGED:
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 		case AVRCP_EVENT_ADDRESSED_PLAYER_CHANGED:
 		case AVRCP_EVENT_UIDS_CHANGED:
 		case AVRCP_EVENT_AVAILABLE_PLAYERS_CHANGED:
@@ -4280,17 +3803,12 @@ static gboolean avrcp_get_capabilities_resp(struct avctp *conn, uint8_t code,
 			if (!session->controller ||
 						!session->controller->player)
 				break;
-#endif
 			/* fall through */
 		case AVRCP_EVENT_VOLUME_CHANGED:
 			avrcp_register_notification(session, event);
 			break;
 		}
 	}
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	session->remote_supported_events = events;
-#endif
 
 	if (!session->controller || !session->controller->player)
 		return FALSE;
@@ -4304,12 +3822,6 @@ static gboolean avrcp_get_capabilities_resp(struct avctp *conn, uint8_t code,
 	if (!(events & (1 << AVRCP_EVENT_STATUS_CHANGED)))
 		avrcp_get_element_attributes(session);
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if ((events & (1 << AVRCP_EVENT_STATUS_CHANGED)) == 0) {
-		session->playback_status_id = g_timeout_add_seconds(1,
-				avrcp_get_playback_status, session);
-	}
-#endif
 	return FALSE;
 }
 
@@ -4421,7 +3933,6 @@ static void avrcp_connect_browsing(struct avrcp *session)
 							session);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
 static void target_init(struct avrcp *session)
 {
 	struct avrcp_server *server = session->server;
@@ -4438,12 +3949,7 @@ static void target_init(struct avrcp *session)
 	DBG("%p version 0x%04x", target, target->version);
 
 	service = btd_device_get_service(session->dev, AVRCP_REMOTE_UUID);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (service)
-		btd_service_connecting_complete(service, 0);
-#else
 	btd_service_connecting_complete(service, 0);
-#endif
 
 	player = g_slist_nth_data(server->players, 0);
 	if (player != NULL) {
@@ -4453,22 +3959,12 @@ static void target_init(struct avrcp *session)
 
 	session->supported_events |= (1 << AVRCP_EVENT_STATUS_CHANGED) |
 				(1 << AVRCP_EVENT_TRACK_CHANGED) |
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 				(1 << AVRCP_EVENT_TRACK_REACHED_START) |
 				(1 << AVRCP_EVENT_TRACK_REACHED_END) |
-#endif
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-				(1 << AVRCP_EVENT_PLAYBACK_POS_CHANGED) |
-#endif
 				(1 << AVRCP_EVENT_SETTINGS_CHANGED);
 
 	if (target->version < 0x0104)
 		return;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (adapter_avrcp_tg_ver < 0x0104)
-		return;
-#endif
 
 	session->supported_events |=
 				(1 << AVRCP_EVENT_ADDRESSED_PLAYER_CHANGED) |
@@ -4484,9 +3980,7 @@ static void target_init(struct avrcp *session)
 
 	avrcp_connect_browsing(session);
 }
-#endif
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
 static void controller_init(struct avrcp *session)
 {
 	struct avrcp_player *player;
@@ -4500,13 +3994,6 @@ static void controller_init(struct avrcp *session)
 	session->controller = controller;
 
 	DBG("%p version 0x%04x", controller, controller->version);
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	session->controller->player = NULL;
-
-	if ((controller->version >= 0x0104) && (adapter_avrcp_ct_ver >= 0x0104))
-		session->supported_events |= (1 << AVRCP_EVENT_VOLUME_CHANGED);
-#endif
 
 	service = btd_device_get_service(session->dev, AVRCP_TARGET_UUID);
 	btd_service_connecting_complete(service, 0);
@@ -4526,17 +4013,11 @@ static void controller_init(struct avrcp *session)
 	if (controller->version < 0x0104)
 		return;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (adapter_avrcp_ct_ver < 0x0104)
-		return;
-#endif
-
 	if (!(controller->features & AVRCP_FEATURE_BROWSING))
 		return;
 
 	avrcp_connect_browsing(session);
 }
-#endif
 
 static void session_init_control(struct avrcp *session)
 {
@@ -4550,14 +4031,12 @@ static void session_init_control(struct avrcp *session)
 							handle_vendordep_pdu,
 							session);
 	session->control_handlers = control_handlers;
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
+
 	if (btd_device_get_service(session->dev, AVRCP_TARGET_UUID) != NULL)
 		controller_init(session);
-#endif
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
+
 	if (btd_device_get_service(session->dev, AVRCP_REMOTE_UUID) != NULL)
 		target_init(session);
-#endif
 }
 
 static void controller_destroy(struct avrcp *session)
@@ -4590,14 +4069,6 @@ static void session_destroy(struct avrcp *session, int err)
 	struct btd_service *service;
 
 	server->sessions = g_slist_remove(server->sessions, session);
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (session->playback_status_id > 0) {
-		DBG("Removing the timer for playback status polling");
-		g_source_remove(session->playback_status_id);
-		session->playback_status_id = 0;
-	}
-#endif
 
 	session_abort_pending_pdu(session);
 
@@ -4915,91 +4386,13 @@ int avrcp_set_volume(struct btd_device *dev, uint8_t volume, bool notify)
 					avrcp_handle_set_volume, session);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-int avrcp_get_target_volume(struct btd_device *dev, uint8_t* volume)
-{
-	struct avrcp_server *server;
-	struct avrcp *session;
-	struct avrcp_player *player;
-	uint8_t vol;
-
-	DBG("avrcp_get_target_volume");
-
-	server = find_server(servers, device_get_adapter(dev));
-	if (server == NULL)
-		return -EINVAL;
-
-	session = find_session(server->sessions, dev);
-	if (!session || !session->controller || !session->target->player)
-		return -ENOTCONN;
-
-	if (!(session->remote_supported_events & (1 << AVRCP_EVENT_VOLUME_CHANGED)))
-		return -ENOTSUP;
-
-	player = session->target->player;
-	if (!player || !player->user_data || !player->cb)
-		return -ENOTSUP;
-
-	vol = player->cb->get_volume(session->dev, player->user_data);
-
-	DBG("avrcp_get_target_volume [%d]", vol);
-	*volume = vol;
-
-	return 0;
-}
-#endif
-
-
-#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
-int avrcp_pause(struct btd_device *dev)
-{
-	struct avrcp_server *server;
-	struct avrcp *session;
-
-	DBG("AVRCP pause");
-
-	server = find_server(servers, device_get_adapter(dev));
-	if (server == NULL)
-		return -EINVAL;
-
-	session = find_session(server->sessions, dev);
-	if (session == NULL)
-		return -ENOTCONN;
-
-	if (session->controller) {
-		DBG("Calling controller pause");
-		ct_press_send_atonce(session->controller->player, AVC_PAUSE);
-	} else {
-		DBG("Controller not found");
-	}
-
-	return 0;
-}
-#endif
-
-
 static int avrcp_connect(struct btd_service *service)
 {
 	struct btd_device *dev = btd_service_get_device(service);
 	const char *path = device_get_path(dev);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	char name[10];
-#endif
+
 	DBG("path %s", path);
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	device_get_name(dev, name, sizeof(name));
-	DBG("name : %s", name);
-	if (g_str_equal(name, "PLT_M50")) {
-		DBG("Don't initiate avrcp connection with this headset");
-		return -ENOTSUP;
-	}
-
-	/* Device unpairing failed if AVRCP connection is triggered
-	during unpairing*/
-	if (device_is_temporary(dev))
-		return -EPERM;
-#endif
 	return control_connect(service);
 }
 
@@ -5027,7 +4420,6 @@ static void avrcp_target_remove(struct btd_service *service)
 	control_unregister(service);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
 static void avrcp_target_server_remove(struct btd_profile *p,
 						struct btd_adapter *adapter)
 {
@@ -5047,9 +4439,7 @@ static void avrcp_target_server_remove(struct btd_profile *p,
 	if (server->ct_record_id == 0)
 		avrcp_server_unregister(server);
 }
-#endif
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
 static int avrcp_target_server_probe(struct btd_profile *p,
 						struct btd_adapter *adapter)
 {
@@ -5084,7 +4474,6 @@ done:
 
 	return 0;
 }
-#endif
 
 static struct btd_profile avrcp_target_profile = {
 	.name		= "audio-avrcp-target",
@@ -5095,10 +4484,9 @@ static struct btd_profile avrcp_target_profile = {
 
 	.connect	= avrcp_connect,
 	.disconnect	= avrcp_disconnect,
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_TARGET
+
 	.adapter_probe	= avrcp_target_server_probe,
 	.adapter_remove = avrcp_target_server_remove,
-#endif
 };
 
 static int avrcp_controller_probe(struct btd_service *service)
@@ -5115,7 +4503,6 @@ static void avrcp_controller_remove(struct btd_service *service)
 	control_unregister(service);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
 static void avrcp_controller_server_remove(struct btd_profile *p,
 						struct btd_adapter *adapter)
 {
@@ -5135,9 +4522,7 @@ static void avrcp_controller_server_remove(struct btd_profile *p,
 	if (server->tg_record_id == 0)
 		avrcp_server_unregister(server);
 }
-#endif
 
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
 static int avrcp_controller_server_probe(struct btd_profile *p,
 						struct btd_adapter *adapter)
 {
@@ -5172,7 +4557,6 @@ done:
 
 	return 0;
 }
-#endif
 
 static struct btd_profile avrcp_controller_profile = {
 	.name		= "avrcp-controller",
@@ -5183,10 +4567,9 @@ static struct btd_profile avrcp_controller_profile = {
 
 	.connect	= avrcp_connect,
 	.disconnect	= avrcp_disconnect,
-#ifdef TIZEN_FEATURE_BLUEZ_AVRCP_CONTROL
+
 	.adapter_probe	= avrcp_controller_server_probe,
 	.adapter_remove = avrcp_controller_server_remove,
-#endif
 };
 
 static int avrcp_init(void)

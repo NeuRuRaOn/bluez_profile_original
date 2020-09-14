@@ -154,40 +154,6 @@ static void handle_appearance(struct gas *gas, uint16_t value_handle)
 		DBG("Failed to send request to read appearance");
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static void read_rpa_res_characteristic_value_cb(bool success, uint8_t att_ecode,
-					const uint8_t *value, uint16_t length,
-					void *user_data)
-{
-	struct gas *gas = user_data;
-	uint8_t rpa_res_support;
-
-	if (!success) {
-		DBG("Reading RPA Resolution Char Value failed with ATT error: %u", att_ecode);
-		return;
-	}
-
-	/* The RPA Resolution Char Value value is a 8-bit unsigned integer */
-	if (length != 1) {
-		DBG("Malformed RPA resolution char value");
-		return;
-	}
-
-	rpa_res_support = *value;
-
-	DBG("GAP RPA Resolution Char Value: %d", rpa_res_support);
-
-	device_set_rpa_res_char_value(gas->device, rpa_res_support);
-}
-
-static void handle_rpa_res_characteristic_value(struct gas *gas, uint16_t value_handle)
-{
-	if (!bt_gatt_client_read_value(gas->client, value_handle,
-						read_rpa_res_characteristic_value_cb, gas, NULL))
-		DBG("Failed to send request to read RPA resolution Char Value");
-}
-#endif
-
 static bool uuid_cmp(uint16_t u16, const bt_uuid_t *uuid)
 {
 	bt_uuid_t lhs;
@@ -214,10 +180,6 @@ static void handle_characteristic(struct gatt_db_attribute *attr,
 		handle_device_name(gas, value_handle);
 	else if (uuid_cmp(GATT_CHARAC_APPEARANCE, &uuid))
 		handle_appearance(gas, value_handle);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	else if (uuid_cmp(GATT_CHARAC_CENTRAL_RPA_RESOLUTION, &uuid))
-		handle_rpa_res_characteristic_value(gas, value_handle);
-#endif
 	else {
 		char uuid_str[MAX_LEN_UUID_STR];
 

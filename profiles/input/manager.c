@@ -53,19 +53,6 @@ static void hid_server_remove(struct btd_profile *p,
 {
 	server_stop(btd_adapter_get_address(adapter));
 }
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-static int hid_device_probe(struct btd_profile *p, struct btd_adapter *adapter)
-{
-	DBG("hid device probe");
-	return server_start(btd_adapter_get_address(adapter));
-}
-
-static void hid_device_remove(struct btd_profile *p,
-						struct btd_adapter *adapter)
-{
-	server_stop(btd_adapter_get_address(adapter));
-}
-#endif
 
 static struct btd_profile input_profile = {
 	.name		= "input-hid",
@@ -82,24 +69,6 @@ static struct btd_profile input_profile = {
 	.adapter_probe	= hid_server_probe,
 	.adapter_remove = hid_server_remove,
 };
-
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-static struct btd_profile input_device_profile = {
-	.name		= "hid-device",
-	.local_uuid	= HID_DEVICE_UUID,
-	.remote_uuid	= HID_DEVICE_UUID,
-
-	.auto_connect	= false,
-	.connect	= input_device_connect,
-	.disconnect	= input_device_disconnect,
-
-	.device_probe	= input_device_role_register,
-	.device_remove	= input_device_role_unregister,
-
-	.adapter_probe	= hid_device_probe,
-	.adapter_remove = hid_device_remove,
-};
-#endif
 
 static GKeyFile *load_config_file(const char *file)
 {
@@ -148,9 +117,7 @@ static int input_init(void)
 	}
 
 	btd_profile_register(&input_profile);
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	btd_profile_register(&input_device_profile);
-#endif
+
 	if (config)
 		g_key_file_free(config);
 
@@ -160,9 +127,6 @@ static int input_init(void)
 static void input_exit(void)
 {
 	btd_profile_unregister(&input_profile);
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	btd_profile_unregister(&input_device_profile);
-#endif
 }
 
 BLUETOOTH_PLUGIN_DEFINE(input, VERSION, BLUETOOTH_PLUGIN_PRIORITY_DEFAULT,

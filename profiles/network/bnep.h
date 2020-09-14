@@ -40,7 +40,3 @@ void bnep_disconnect(struct bnep *session);
 int bnep_server_add(int sk, char *bridge, char *iface, const bdaddr_t *addr,
 						uint8_t *setup_data, int len);
 void bnep_server_delete(char *bridge, char *iface, const bdaddr_t *addr);
-#ifdef  TIZEN_FEATURE_BLUEZ_MODIFY
-int bnep_if_down_wrapper(const char *devname);
-int bnep_conndel_wrapper(const bdaddr_t *dst);
-#endif

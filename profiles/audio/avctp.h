@@ -95,11 +95,6 @@
 #define AVC_FORWARD			0x4b
 #define AVC_BACKWARD			0x4c
 #define AVC_LIST			0x4d
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#define AVC_ABS_VOLUME         0x50
-#endif
-
 #define AVC_F1				0x71
 #define AVC_F2				0x72
 #define AVC_F3				0x73
@@ -178,12 +173,6 @@ unsigned int avctp_register_browsing_pdu_handler(struct avctp *session,
 gboolean avctp_unregister_browsing_pdu_handler(unsigned int id);
 
 int avctp_send_passthrough(struct avctp *session, uint8_t op);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-int avctp_send_release_passthrough(struct avctp *session, uint8_t op);
-#endif
-#ifdef TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM
-int avctp_send_passthrough_send_fast(struct avctp *session, uint8_t op);
-#endif
 int avctp_send_vendordep(struct avctp *session, uint8_t transaction,
 				uint8_t code, uint8_t subunit,
 				uint8_t *operands, size_t operand_count);

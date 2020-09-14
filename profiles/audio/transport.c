@@ -54,12 +54,6 @@
 
 #define MEDIA_TRANSPORT_INTERFACE "org.bluez.MediaTransport1"
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#define AUDIO_STREAM_MANAGER_NAME "org.pulseaudio.Server"
-#define AUDIO_STREAM_MANAGER_PATH "/org/pulseaudio/StreamManager"
-#define AUDIO_STREAM_MANAGER_INTERFACE "org.pulseaudio.StreamManager"
-#endif
-
 typedef enum {
 	TRANSPORT_STATE_IDLE,		/* Not acquired and suspended */
 	TRANSPORT_STATE_PENDING,	/* Playing but not acquired */
@@ -97,7 +91,6 @@ struct a2dp_transport {
 struct media_transport {
 	char			*path;		/* Transport object path */
 	struct btd_device	*device;	/* Transport device */
-	const char		*remote_endpoint; /* Transport remote SEP */
 	struct media_endpoint	*endpoint;	/* Transport endpoint */
 	struct media_owner	*owner;		/* Transport owner */
 	uint8_t			*configuration; /* Transport configuration */
@@ -615,7 +608,6 @@ static gboolean get_state(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 static gboolean delay_exists(const GDBusPropertyTable *property, void *data)
 {
 	struct media_transport *transport = data;
@@ -623,7 +615,6 @@ static gboolean delay_exists(const GDBusPropertyTable *property, void *data)
 
 	return a2dp->delay != 0;
 }
-#endif
 
 static gboolean get_delay(const GDBusPropertyTable *property,
 					DBusMessageIter *iter, void *data)
@@ -636,42 +627,6 @@ static gboolean get_delay(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static void set_delay(const GDBusPropertyTable *property,
-			DBusMessageIter *iter, GDBusPendingPropertySet id,
-			void *data)
-{
-	struct media_transport *transport = data;
-	struct a2dp_transport *a2dp = transport->data;
-	uint16_t delay;
-	bool notify;
-
-	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT16) {
-		g_dbus_pending_property_error(id,
-					ERROR_INTERFACE ".InvalidArguments",
-					"Invalid arguments in method call");
-		return;
-	}
-
-	dbus_message_iter_get_basic(iter, &delay);
-	DBG("Delay : %d", delay);
-
-	g_dbus_pending_property_success(id);
-
-	a2dp->delay = delay;
-
-	notify = transport->source_watch ? true : false;
-	if (notify)
-		g_dbus_emit_property_changed(btd_get_dbus_connection(),
-						transport->path,
-						MEDIA_TRANSPORT_INTERFACE,
-						"Delay");
-
-	delay_report_req(delay);
-}
-#endif
-
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 static gboolean volume_exists(const GDBusPropertyTable *property, void *data)
 {
 	struct media_transport *transport = data;
@@ -679,7 +634,6 @@ static gboolean volume_exists(const GDBusPropertyTable *property, void *data)
 
 	return a2dp->volume <= 127;
 }
-#endif
 
 static gboolean get_volume(const GDBusPropertyTable *property,
 					DBusMessageIter *iter, void *data)
@@ -734,24 +688,6 @@ static void set_volume(const GDBusPropertyTable *property,
 	avrcp_set_volume(transport->device, volume, notify);
 }
 
-static gboolean endpoint_exists(const GDBusPropertyTable *property, void *data)
-{
-	struct media_transport *transport = data;
-
-	return transport->remote_endpoint != NULL;
-}
-
-static gboolean get_endpoint(const GDBusPropertyTable *property,
-					DBusMessageIter *iter, void *data)
-{
-	struct media_transport *transport = data;
-
-	dbus_message_iter_append_basic(iter, DBUS_TYPE_OBJECT_PATH,
-					&transport->remote_endpoint);
-
-	return TRUE;
-}
-
 static const GDBusMethodTable transport_methods[] = {
 	{ GDBUS_ASYNC_METHOD("Acquire",
 			NULL,
@@ -773,15 +709,8 @@ static const GDBusPropertyTable transport_properties[] = {
 	{ "Codec", "y", get_codec },
 	{ "Configuration", "ay", get_configuration },
 	{ "State", "s", get_state },
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	{ "Delay", "q", get_delay, set_delay },
-	{ "Volume", "q", get_volume, set_volume },
-#else
 	{ "Delay", "q", get_delay, NULL, delay_exists },
 	{ "Volume", "q", get_volume, set_volume, volume_exists },
-#endif
-	{ "Endpoint", "o", get_endpoint, NULL, endpoint_exists,
-				G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
 	{ }
 };
 
@@ -812,42 +741,6 @@ static void media_transport_free(void *data)
 	g_free(transport);
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#define AVC_MAX_VOLUME  127
-#define AVC_INITIAL_MAX_VOLUME  (AVC_MAX_VOLUME * 3 / 5 + 1)
-#define DEVICE_MAX_VOLUME  150
-#define DEVICE_INITIAL_MAX_VOLUME  (DEVICE_MAX_VOLUME * 3 / 5)
-
-static void media_transport_init_volume(struct media_transport *transport) {
-	struct a2dp_transport *a2dp = transport->data;
-	uint8_t vol = 0;
-	int ret;
-
-	ret = avrcp_get_target_volume(transport->device, &vol);
-
-	if (ret)	/* not support AVC */
-		return;
-
-	if (vol > AVC_MAX_VOLUME)
-		return;
-
-	if (vol <= AVC_INITIAL_MAX_VOLUME && vol == a2dp->volume) {
-		DBG("The volume is already initialized");
-		return;
-	}
-
-	/* Ear-shock issue */
-	if (vol > AVC_INITIAL_MAX_VOLUME) {
-		vol = AVC_INITIAL_MAX_VOLUME;
-		avrcp_set_volume(transport->device, AVC_INITIAL_MAX_VOLUME, 0x00);
-	}
-
-	media_transport_update_volume(transport, vol);
-
-	DBG("Get AVC volume from controller : volume [%d])", a2dp->volume);
-}
-#endif
-
 static void transport_update_playing(struct media_transport *transport,
 							gboolean playing)
 {
@@ -877,11 +770,6 @@ static void sink_state_changed(struct btd_service *service,
 		transport_update_playing(transport, TRUE);
 	else
 		transport_update_playing(transport, FALSE);
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (new_state == SINK_STATE_CONNECTED || new_state == SINK_STATE_PLAYING)
-		media_transport_init_volume(transport);
-#endif
 }
 
 static void source_state_changed(struct btd_service *service,
@@ -914,12 +802,7 @@ static int media_transport_init_source(struct media_transport *transport)
 	transport->data = a2dp;
 	transport->destroy = destroy_a2dp;
 
-		a2dp->volume = -1;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	media_transport_init_volume(transport);
-#endif
-
+	a2dp->volume = -1;
 	transport->sink_watch = sink_add_state_cb(service, sink_state_changed,
 								transport);
 
@@ -952,7 +835,6 @@ static int media_transport_init_sink(struct media_transport *transport)
 }
 
 struct media_transport *media_transport_create(struct btd_device *device,
-						const char *remote_endpoint,
 						uint8_t *configuration,
 						size_t size, void *data)
 {
@@ -967,10 +849,8 @@ struct media_transport *media_transport_create(struct btd_device *device,
 	transport->configuration = g_new(uint8_t, size);
 	memcpy(transport->configuration, configuration, size);
 	transport->size = size;
-	transport->remote_endpoint = remote_endpoint;
-	transport->path = g_strdup_printf("%s/fd%d",
-				remote_endpoint ? remote_endpoint :
-				device_get_path(device), fd++);
+	transport->path = g_strdup_printf("%s/fd%d", device_get_path(device),
+									fd++);
 	transport->fd = -1;
 
 	uuid = media_endpoint_get_uuid(endpoint);
@@ -1032,39 +912,6 @@ uint16_t media_transport_get_volume(struct media_transport *transport)
 	return a2dp->volume;
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static int media_transport_set_volume_level(uint32_t volume)
-{
-	DBusMessage *msg;
-	int ret;
-	char *direction = "out";
-	char *type = "media";
-	uint32_t requested_volume = volume;
-
-	msg = dbus_message_new_method_call(AUDIO_STREAM_MANAGER_NAME, AUDIO_STREAM_MANAGER_PATH,
-			AUDIO_STREAM_MANAGER_INTERFACE, "SetVolumeLevel");
-	if (!msg) {
-		error("Failed to get dbus message");
-		return -ENOMEM;
-	}
-
-	dbus_message_append_args(msg, DBUS_TYPE_STRING, &direction,
-			DBUS_TYPE_STRING, &type,
-			DBUS_TYPE_UINT32, &requested_volume,
-			DBUS_TYPE_INVALID);
-
-	ret = dbus_connection_send(btd_get_dbus_connection(), msg, NULL);
-	if (!ret) {
-		error("Failed to send message");
-		dbus_message_unref(msg);
-		return -EIO;
-	}
-
-	dbus_message_unref(msg);
-	return 0;
-}
-#endif
-
 void media_transport_update_volume(struct media_transport *transport,
 								uint8_t volume)
 {
@@ -1079,18 +926,6 @@ void media_transport_update_volume(struct media_transport *transport,
 	g_dbus_emit_property_changed(btd_get_dbus_connection(),
 					transport->path,
 					MEDIA_TRANSPORT_INTERFACE, "Volume");
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	/* Don't set the system volume in AVC Target mode */
-	if (transport->source_watch > 0) {
-		DBG("Request to set the system volume");
-
-		if (media_transport_set_volume_level((uint32_t)volume) < 0) {
-			error("Failed to send set volume req");
-			return;
-		}
-	}
-#endif
 }
 
 uint8_t media_transport_get_device_volume(struct btd_device *dev)
@@ -1131,10 +966,3 @@ void media_transport_update_device_volume(struct btd_device *dev,
 			media_transport_update_volume(transport, volume);
 	}
 }
-
-#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
-void media_transport_set_stream_status(struct btd_device *device, bool pause)
-{
-	avdtp_set_source_status(device, pause);
-}
-#endif

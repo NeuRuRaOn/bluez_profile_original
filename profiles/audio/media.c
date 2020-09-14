@@ -44,14 +44,9 @@
 #include "src/dbus-common.h"
 #include "src/profile.h"
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#include "src/service.h"
-#endif
-
 #include "src/uuid-helper.h"
 #include "src/log.h"
 #include "src/error.h"
-#include "src/shared/util.h"
 #include "src/shared/queue.h"
 
 #include "avdtp.h"
@@ -59,44 +54,15 @@
 #include "transport.h"
 #include "a2dp.h"
 #include "avrcp.h"
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#include "sink.h"
-#endif
 
 #define MEDIA_INTERFACE "org.bluez.Media1"
 #define MEDIA_ENDPOINT_INTERFACE "org.bluez.MediaEndpoint1"
 #define MEDIA_PLAYER_INTERFACE "org.mpris.MediaPlayer2.Player"
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#define A2DP_SINK_ROLE "sink"
-#define A2DP_SOURCE_ROLE "source"
-#endif
-
 #define REQUEST_TIMEOUT (3 * 1000)		/* 3 seconds */
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-#define SINK_SUSPEND_TIMEOUT 4		/* 4 seconds */
-
-unsigned int suspend_timer_id = 0;
-static gboolean a2dp_sink_support = false;
-static gboolean a2dp_source_support = true;
-#endif
-
-struct media_app {
-	struct media_adapter	*adapter;
-	GDBusClient		*client;
-	DBusMessage		*reg;
-	char			*sender;	/* Application bus id */
-	char			*path;		/* Application object path */
-	struct queue		*proxies;	/* Application proxies */
-	struct queue		*endpoints;	/* Application endpoints */
-	struct queue		*players;	/* Application players */
-	int			err;
-};
 
 struct media_adapter {
 	struct btd_adapter	*btd_adapter;
-	struct queue		*apps;		/* Application list */
 	GSList			*endpoints;	/* Endpoints list */
 	GSList			*players;	/* Players list */
 };
@@ -136,9 +102,6 @@ struct media_player {
 	guint			watch;
 	guint			properties_watch;
 	guint			seek_watch;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	guint			sink_watch;
-#endif
 	char			*status;
 	uint32_t		position;
 	uint32_t		duration;
@@ -153,26 +116,6 @@ struct media_player {
 };
 
 static GSList *adapters = NULL;
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static gboolean set_avrcp_status = FALSE;
-static gboolean send_track_changed_event = FALSE;
-
-gboolean current_delay_reporting = false;
-struct media_endpoint *source_endpoint = NULL;
-struct media_endpoint *sink_endpoint = NULL;
-
-static int media_set_sink_callback(struct btd_device *device,
-				struct media_player *mp);
-static void media_sink_state_changed_cb(struct btd_service *service,
-				sink_state_t old_state,
-				sink_state_t new_state,
-				void *user_data);
-void media_stop_suspend_timer(void);
-struct media_player *media_adapter_get_player(struct media_adapter *adapter);
-static struct media_adapter *find_adapter(struct btd_device *device);
-static uint32_t get_position(void *user_data);
-#endif
 
 static void endpoint_request_free(struct endpoint_request *request)
 {
@@ -250,16 +193,13 @@ static struct media_endpoint *media_adapter_find_endpoint(
 	return NULL;
 }
 
-static void media_endpoint_remove(void *data)
+static void media_endpoint_remove(struct media_endpoint *endpoint)
 {
-	struct media_endpoint *endpoint = data;
 	struct media_adapter *adapter = endpoint->adapter;
 
 	if (endpoint->sep) {
 		a2dp_remove_sep(endpoint->sep);
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 		return;
-#endif
 	}
 
 	info("Endpoint unregistered: sender=%s path=%s", endpoint->sender,
@@ -288,9 +228,6 @@ static void clear_configuration(struct media_endpoint *endpoint,
 {
 	DBusMessage *msg;
 	const char *path;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	struct media_player *mp;
-#endif
 
 	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
 						MEDIA_ENDPOINT_INTERFACE,
@@ -306,14 +243,6 @@ static void clear_configuration(struct media_endpoint *endpoint,
 	g_dbus_send_message(btd_get_dbus_connection(), msg);
 done:
 	endpoint->transports = g_slist_remove(endpoint->transports, transport);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if ((mp = media_adapter_get_player(endpoint->adapter)))
-		if (mp->sink_watch) {
-			sink_remove_state_cb(mp->sink_watch);
-			mp->sink_watch = 0;
-		}
-	media_stop_suspend_timer();
-#endif
 	media_transport_destroy(transport);
 }
 
@@ -476,141 +405,6 @@ static struct media_transport *find_device_transport(
 	return match->data;
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-struct media_player * media_adapter_get_player(struct media_adapter * adapter)
-{
-	GSList *l;
-	DBG(" ");
-
-	for (l = adapter->players; l; l = l->next) {
-		struct media_player *mp = l->data;
-		if (mp != NULL)
-			return mp;
-	}
-	return NULL;
-}
-
-void media_stop_suspend_timer(void)
-{
-	if (suspend_timer_id > 0) {
-		DBG("Removing sink suspend timer");
-		g_source_remove(suspend_timer_id);
-		suspend_timer_id = 0;
-	}
-}
-
-gboolean media_reset_mp_status(gpointer user_data)
-{
-	struct media_player *mp = user_data;
-	DBG(" ");
-
-	/* PlayBackStatus already reset; so return */
-	if (g_strcmp0(mp->status, "playing") != 0)
-		return FALSE;
-
-	mp->position = get_position(mp);
-	g_timer_start(mp->timer);
-
-	g_free(mp->status);
-	mp->status = g_strdup("paused");
-	suspend_timer_id = 0;
-	avrcp_player_event(mp->player, AVRCP_EVENT_STATUS_CHANGED, mp->status);
-
-	return FALSE;
-}
-
-static void media_sink_state_changed_cb(struct btd_service *service,
-					sink_state_t old_state,
-					sink_state_t new_state,
-					void *user_data)
-{
-	struct media_player *mp = user_data;
-	DBG(" ");
-
-	/* Check if A2DP streaming is suspended */
-	if ((old_state == SINK_STATE_PLAYING) &&
-		(new_state == SINK_STATE_CONNECTED)) {
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		struct btd_device *device = btd_service_get_device(service);
-		char name[20] = {0,};
-#endif
-
-		/* Check AVRCP play back status */
-		if (g_strcmp0(mp->status, "playing") != 0)
-			return;
-
-		media_stop_suspend_timer();
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		device_get_name(device, name, sizeof(name));
-		DBG("Name : %s", name);
-
-		if (g_str_has_prefix(name, "LG HBS") != TRUE) {
-#endif
-		/* PlayBackStatus is still PLAYING; start a timer */
-		suspend_timer_id = g_timeout_add_seconds(SINK_SUSPEND_TIMEOUT,
-				media_reset_mp_status, mp);
-		DBG("SINK SUSPEND TIMEOUT started");
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		}
-#endif
-	}
-
-	/* Check if A2DP streaming is started */
-	if ((old_state == SINK_STATE_CONNECTED) &&
-		(new_state == SINK_STATE_PLAYING)) {
-
-		struct btd_device *device = btd_service_get_device(service);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		char name[20] = {0,};
-#else
-		char name[20];
-#endif
-
-		media_stop_suspend_timer();
-
-		/* NULL packet streaming during initial connection */
-		if (set_avrcp_status == FALSE) {
-			set_avrcp_status = TRUE;
-			return;
-		}
-
-		/* Check for BMW, Audi, VW car kit */
-		device_get_name(device, name, sizeof(name));
-		DBG("Name : %s", name);
-		if ((g_str_has_prefix(name, "BMW") == TRUE) ||
-				(g_str_has_prefix(name, "Audi") == TRUE) ||
-				(g_str_has_prefix(name, "VW BT") == TRUE)) {
-
-			/* Check AVRCP play back status */
-			if (g_strcmp0(mp->status, "playing") == 0)
-				return;
-
-			g_free(mp->status);
-			mp->status = g_strdup("playing");
-			avrcp_player_event(mp->player,
-				AVRCP_EVENT_STATUS_CHANGED, mp->status);
-		}
-	}
-}
-
-static int media_set_sink_callback(struct btd_device *device,
-					struct media_player *mp)
-{
-	struct btd_service *service;
-	DBG(" ");
-
-	service = btd_device_get_service(device, A2DP_SINK_UUID);
-	if (service == NULL)
-		return -EINVAL;
-
-	mp->sink_watch = sink_add_state_cb(service, media_sink_state_changed_cb, mp);
-
-	return 0;
-}
-#endif
-
 struct a2dp_config_data {
 	struct a2dp_setup *setup;
 	a2dp_endpoint_config_t cb;
@@ -629,19 +423,14 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 	const char *path;
 	DBusMessageIter iter;
 	struct media_transport *transport;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	struct media_adapter *adapter;
-	struct media_player *mp;
-#endif
 
 	transport = find_device_transport(endpoint, device);
 
 	if (transport != NULL)
 		return FALSE;
 
-	transport = media_transport_create(device,
-					a2dp_setup_remote_path(data->setup),
-					configuration, size, endpoint);
+	transport = media_transport_create(device, configuration, size,
+								endpoint);
 	if (transport == NULL)
 		return FALSE;
 
@@ -653,13 +442,6 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 		media_transport_destroy(transport);
 		return FALSE;
 	}
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	set_avrcp_status = FALSE;
-	adapter = find_adapter(device);
-	if ((mp = media_adapter_get_player(adapter)))
-		media_set_sink_callback(device, mp);
-#endif
 
 	endpoint->transports = g_slist_append(endpoint->transports, transport);
 
@@ -675,9 +457,7 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 
 static void release_endpoint(struct media_endpoint *endpoint)
 {
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	DBusMessage *msg;
-#endif
 
 	DBG("sender=%s path=%s", endpoint->sender, endpoint->path);
 
@@ -687,7 +467,6 @@ static void release_endpoint(struct media_endpoint *endpoint)
 
 	clear_endpoint(endpoint);
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
 						MEDIA_ENDPOINT_INTERFACE,
 						"Release");
@@ -697,7 +476,6 @@ static void release_endpoint(struct media_endpoint *endpoint)
 	}
 
 	g_dbus_send_message(btd_get_dbus_connection(), msg);
-#endif
 
 done:
 	media_endpoint_remove(endpoint);
@@ -708,13 +486,6 @@ static const char *get_name(struct a2dp_sep *sep, void *user_data)
 	struct media_endpoint *endpoint = user_data;
 
 	return endpoint->sender;
-}
-
-static const char *get_path(struct a2dp_sep *sep, void *user_data)
-{
-	struct media_endpoint *endpoint = user_data;
-
-	return endpoint->path;
 }
 
 static size_t get_capabilities(struct a2dp_sep *sep, uint8_t **capabilities,
@@ -807,7 +578,6 @@ static void set_delay(struct a2dp_sep *sep, uint16_t delay, void *user_data)
 
 static struct a2dp_endpoint a2dp_endpoint = {
 	.get_name = get_name,
-	.get_path = get_path,
 	.get_capabilities = get_capabilities,
 	.select_configuration = select_config,
 	.set_configuration = set_config,
@@ -815,7 +585,6 @@ static struct a2dp_endpoint a2dp_endpoint = {
 	.set_delay = set_delay
 };
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 static void a2dp_destroy_endpoint(void *user_data)
 {
 	struct media_endpoint *endpoint = user_data;
@@ -823,7 +592,6 @@ static void a2dp_destroy_endpoint(void *user_data)
 	endpoint->sep = NULL;
 	release_endpoint(endpoint);
 }
-#endif
 
 static gboolean endpoint_init_a2dp_source(struct media_endpoint *endpoint,
 						gboolean delay_reporting,
@@ -832,11 +600,7 @@ static gboolean endpoint_init_a2dp_source(struct media_endpoint *endpoint,
 	endpoint->sep = a2dp_add_sep(endpoint->adapter->btd_adapter,
 					AVDTP_SEP_TYPE_SOURCE, endpoint->codec,
 					delay_reporting, &a2dp_endpoint,
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-					endpoint, NULL, err);
-#else
 					endpoint, a2dp_destroy_endpoint, err);
-#endif
 	if (endpoint->sep == NULL)
 		return FALSE;
 
@@ -850,11 +614,7 @@ static gboolean endpoint_init_a2dp_sink(struct media_endpoint *endpoint,
 	endpoint->sep = a2dp_add_sep(endpoint->adapter->btd_adapter,
 					AVDTP_SEP_TYPE_SINK, endpoint->codec,
 					delay_reporting, &a2dp_endpoint,
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-					endpoint, NULL, err);
-#else
 					endpoint, a2dp_destroy_endpoint, err);
-#endif
 	if (endpoint->sep == NULL)
 		return FALSE;
 
@@ -984,31 +744,13 @@ static struct media_endpoint *media_endpoint_create(struct media_adapter *adapte
 
 	endpoint->adapter = adapter;
 
-	if (strcasecmp(uuid, A2DP_SOURCE_UUID) == 0) {
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		source_endpoint = endpoint;
-		if (btd_adapter_get_a2dp_role(adapter->btd_adapter) == BLUETOOTH_A2DP_SINK_ROLE)
-			return endpoint;
-		else
-			succeeded = endpoint_init_a2dp_source(endpoint,
-							delay_reporting, err);
-#else
+	if (strcasecmp(uuid, A2DP_SOURCE_UUID) == 0)
 		succeeded = endpoint_init_a2dp_source(endpoint,
 							delay_reporting, err);
-#endif
-	} else if (strcasecmp(uuid, A2DP_SINK_UUID) == 0) {
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		sink_endpoint = endpoint;
-		if (btd_adapter_get_a2dp_role(adapter->btd_adapter) == BLUETOOTH_A2DP_SOURCE_ROLE)
-			return endpoint;
-		else
-			succeeded = endpoint_init_a2dp_sink(endpoint,
-							delay_reporting, err);
-#else
+	else if (strcasecmp(uuid, A2DP_SINK_UUID) == 0)
 		succeeded = endpoint_init_a2dp_sink(endpoint,
 							delay_reporting, err);
-#endif
-	} else if (strcasecmp(uuid, HFP_AG_UUID) == 0 ||
+	else if (strcasecmp(uuid, HFP_AG_UUID) == 0 ||
 					strcasecmp(uuid, HSP_AG_UUID) == 0)
 		succeeded = TRUE;
 	else if (strcasecmp(uuid, HFP_HS_UUID) == 0 ||
@@ -1039,12 +781,6 @@ static struct media_endpoint *media_endpoint_create(struct media_adapter *adapte
 
 	adapter->endpoints = g_slist_append(adapter->endpoints, endpoint);
 	info("Endpoint registered: sender=%s path=%s", sender, path);
-
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	info("Emit property changed signal for A2dpRole");
-
-	btd_adapter_emit_a2dp_role_changed(adapter->btd_adapter);
-#endif
 
 	if (err)
 		*err = 0;
@@ -1101,74 +837,6 @@ static int parse_properties(DBusMessageIter *props, const char **uuid,
 	return (has_uuid && has_codec) ? 0 : -EINVAL;
 }
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static DBusMessage *a2dp_select_role(DBusConnection *conn, DBusMessage *msg,
-					void *data)
-{
-	struct media_adapter *adapter = data;
-	const char *a2dp_role;
-	gboolean ret;
-
-	if (!dbus_message_get_args(msg, NULL,
-				DBUS_TYPE_STRING, &a2dp_role,
-				DBUS_TYPE_INVALID))
-		return btd_error_invalid_args(msg);
-
-	if (!g_strcmp0(a2dp_role, A2DP_SINK_ROLE)) {
-		if (btd_adapter_get_a2dp_role(adapter->btd_adapter) == BLUETOOTH_A2DP_SINK_ROLE) {
-			DBG("Already selected A2DP sink role");
-			return btd_error_already_exists(msg);
-		}
-
-		if (sink_endpoint == NULL) {
-			DBG("sink_endpoint is NULL, so can't init the sink_endpoint");
-			return btd_error_not_available(msg);
-		}
-
-		ret = endpoint_init_a2dp_sink(sink_endpoint, current_delay_reporting, NULL);
-		if (!ret) {
-			DBG("could not init a2dp sink");
-			return btd_error_failed(msg, "Can't init a2dp sink");
-		}
-
-		btd_adapter_set_a2dp_role(adapter->btd_adapter, BLUETOOTH_A2DP_SINK_ROLE);
-
-		if (source_endpoint && source_endpoint->sep)
-			a2dp_remove_sep(source_endpoint->sep);
-
-		source_endpoint->sep = NULL;
-	} else if (!g_strcmp0(a2dp_role, A2DP_SOURCE_ROLE)) {
-		if (btd_adapter_get_a2dp_role(adapter->btd_adapter) == BLUETOOTH_A2DP_SOURCE_ROLE) {
-			DBG("Already selected A2DP sink role");
-			return btd_error_already_exists(msg);
-		}
-
-		if (source_endpoint == NULL) {
-			DBG("source_endpoint is NULL, so can't init the source_endpoint");
-			return btd_error_not_available(msg);
-		}
-
-		ret = endpoint_init_a2dp_source(source_endpoint, current_delay_reporting, NULL);
-		if (!ret) {
-			DBG("could not init a2dp source");
-			return btd_error_failed(msg, "Can't init a2dp source");
-		}
-
-		btd_adapter_set_a2dp_role(adapter->btd_adapter, BLUETOOTH_A2DP_SOURCE_ROLE);
-
-		if (sink_endpoint && sink_endpoint->sep)
-			a2dp_remove_sep(sink_endpoint->sep);
-
-		sink_endpoint->sep = NULL;
-	} else {
-		DBG("invalid a2dp role");
-		return btd_error_invalid_args(msg);
-	}
-
-	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
-}
-#endif
-
 static DBusMessage *register_endpoint(DBusConnection *conn, DBusMessage *msg,
 					void *data)
 {
@@ -1180,15 +848,7 @@ static DBusMessage *register_endpoint(DBusConnection *conn, DBusMessage *msg,
 	uint8_t *capabilities;
 	int size = 0;
 	int err;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (btd_adapter_get_a2dp_role(adapter->btd_adapter) == BLUETOOTH_A2DP_SINK_ROLE) {
-		a2dp_sink_support = true;
-		a2dp_source_support = false;
-	} else {
-		a2dp_sink_support = false;
-		a2dp_source_support = true;
-	}
-#endif
+
 	sender = dbus_message_get_sender(msg);
 
 	dbus_message_iter_init(msg, &args);
@@ -1206,9 +866,7 @@ static DBusMessage *register_endpoint(DBusConnection *conn, DBusMessage *msg,
 	if (parse_properties(&props, &uuid, &delay_reporting, &codec,
 						&capabilities, &size) < 0)
 		return btd_error_invalid_args(msg);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	current_delay_reporting = delay_reporting;
-#endif
+
 	if (media_endpoint_create(adapter, sender, path, uuid, delay_reporting,
 				codec, capabilities, size, &err) == NULL) {
 		if (err == -EPROTONOSUPPORT)
@@ -1303,13 +961,6 @@ static void media_player_free(gpointer data)
 	if (mp->settings)
 		g_hash_table_unref(mp->settings);
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	media_stop_suspend_timer();
-
-	if (mp->sink_watch)
-		sink_remove_state_cb(mp->sink_watch);
-#endif
-
 	g_timer_destroy(mp->timer);
 	g_free(mp->sender);
 	g_free(mp->path);
@@ -1335,10 +986,8 @@ static void media_player_destroy(struct media_player *mp)
 	media_player_free(mp);
 }
 
-static void media_player_remove(void *data)
+static void media_player_remove(struct media_player *mp)
 {
-	struct media_player *mp = data;
-
 	info("Player unregistered: sender=%s path=%s", mp->sender, mp->path);
 
 	media_player_destroy(mp);
@@ -1477,11 +1126,6 @@ static uint64_t get_uid(void *user_data)
 	if (mp->track == NULL)
 		return UINT64_MAX;
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (!g_hash_table_lookup(mp->track, "Title"))
-		return UINT64_MAX;
-#endif
-
 	return 0;
 }
 
@@ -1553,14 +1197,7 @@ static void set_volume(uint8_t volume, struct btd_device *dev, void *user_data)
 		media_transport_update_volume(transport, volume);
 	}
 }
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-static uint8_t get_volume(struct btd_device *dev, void *user_data)
-{
-	struct media_player *mp = user_data;
 
-	return mp->volume;
-}
-#endif
 static bool media_player_send(struct media_player *mp, const char *name)
 {
 	DBusMessage *msg;
@@ -1649,9 +1286,6 @@ static struct avrcp_player_cb player_cb = {
 	.get_status = get_status,
 	.get_name = get_player_name,
 	.set_volume = set_volume,
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	.get_volume = get_volume,
-#endif
 	.play = play,
 	.stop = stop,
 	.pause = pause,
@@ -1670,9 +1304,6 @@ static void media_player_exit(DBusConnection *connection, void *user_data)
 static gboolean set_status(struct media_player *mp, DBusMessageIter *iter)
 {
 	const char *value;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint32_t playback_position;
-#endif
 
 	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_STRING)
 		return FALSE;
@@ -1690,49 +1321,26 @@ static gboolean set_status(struct media_player *mp, DBusMessageIter *iter)
 	mp->status = g_strdup(value);
 
 	avrcp_player_event(mp->player, AVRCP_EVENT_STATUS_CHANGED, mp->status);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (strcasecmp(mp->status, "reverse-seek") != 0 &&
-		strcasecmp(mp->status, "playing") != 0) {
-		playback_position = get_position(mp);
-		avrcp_player_event(mp->player, AVRCP_EVENT_PLAYBACK_POS_CHANGED,
-							&playback_position);
-	}
-#endif
 
 	return TRUE;
 }
 
 static gboolean set_position(struct media_player *mp, DBusMessageIter *iter)
 {
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint32_t value;
-#else
 	uint64_t value;
 	const char *status;
-#endif
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint32_t playback_position;
-#endif
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_INT64)
-		return FALSE;
-#else
-	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT32)
-		return FALSE;
-#endif
+			return FALSE;
+
 	dbus_message_iter_get_basic(iter, &value);
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	value /= 1000;
-#endif
-	DBG("Value %d", value);
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
+
 	if (value > get_position(mp))
 		status = "forward-seek";
 	else
 		status = "reverse-seek";
-#endif
 
 	mp->position = value;
 	g_timer_start(mp->timer);
@@ -1742,12 +1350,6 @@ static gboolean set_position(struct media_player *mp, DBusMessageIter *iter)
 	if (!mp->position) {
 		avrcp_player_event(mp->player,
 					AVRCP_EVENT_TRACK_REACHED_START, NULL);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		playback_position = get_position(mp);
-		avrcp_player_event(mp->player, AVRCP_EVENT_PLAYBACK_POS_CHANGED,
-						&playback_position);
-#endif
-
 		return TRUE;
 	}
 
@@ -1758,23 +1360,11 @@ static gboolean set_position(struct media_player *mp, DBusMessageIter *iter)
 	if (mp->position == UINT32_MAX || mp->position >= mp->duration) {
 		avrcp_player_event(mp->player, AVRCP_EVENT_TRACK_REACHED_END,
 									NULL);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		playback_position = get_position(mp);
-		avrcp_player_event(mp->player, AVRCP_EVENT_PLAYBACK_POS_CHANGED,
-						&playback_position);
-#endif
 		return TRUE;
 	}
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	/* Send a status change to force resync the position */
 	avrcp_player_event(mp->player, AVRCP_EVENT_STATUS_CHANGED, status);
-#endif
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	playback_position = get_position(mp);
-	avrcp_player_event(mp->player, AVRCP_EVENT_PLAYBACK_POS_CHANGED,
-						&playback_position);
-#endif
 
 	return TRUE;
 }
@@ -1782,15 +1372,6 @@ static gboolean set_position(struct media_player *mp, DBusMessageIter *iter)
 static void set_metadata(struct media_player *mp, const char *key,
 							const char *value)
 {
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	const char *current_value = NULL;
-
-	current_value = g_hash_table_lookup(mp->track, key);
-
-	if ((g_strcmp0(value, current_value) != 0) &&
-		(send_track_changed_event == FALSE))
-		send_track_changed_event = TRUE;
-#endif
 	DBG("%s=%s", key, value);
 	g_hash_table_replace(mp->track, g_strdup(key), g_strdup(value));
 }
@@ -1850,9 +1431,7 @@ static gboolean parse_int64_metadata(struct media_player *mp, const char *key,
 	dbus_message_iter_get_basic(iter, &value);
 
 	if (strcasecmp(key, "Duration") == 0) {
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 		value /= 1000;
-#endif
 		mp->duration = value;
 	}
 
@@ -1893,9 +1472,6 @@ static gboolean parse_player_metadata(struct media_player *mp,
 	int ctype;
 	gboolean title = FALSE;
 	uint64_t uid;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	uint32_t playback_position;
-#endif
 
 	ctype = dbus_message_iter_get_arg_type(iter);
 	if (ctype != DBUS_TYPE_ARRAY)
@@ -1903,13 +1479,11 @@ static gboolean parse_player_metadata(struct media_player *mp,
 
 	dbus_message_iter_recurse(iter, &dict);
 
-#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	if (mp->track != NULL)
 		g_hash_table_unref(mp->track);
 
 	mp->track = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
 								g_free);
-#endif
 
 	while ((ctype = dbus_message_iter_get_arg_type(&dict)) !=
 							DBUS_TYPE_INVALID) {
@@ -1947,11 +1521,6 @@ static gboolean parse_player_metadata(struct media_player *mp,
 		} else if (strcasecmp(key, "mpris:length") == 0) {
 			if (!parse_int64_metadata(mp, "Duration", &var))
 				return FALSE;
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-		} else if (strcasecmp(key, "xesam:totalTracks") == 0) {
-			if (!parse_int32_metadata(mp, "NumberOfTracks", &var))
-				return FALSE;
-#endif
 		} else if (strcasecmp(key, "xesam:trackNumber") == 0) {
 			if (!parse_int32_metadata(mp, "TrackNumber", &var))
 				return FALSE;
@@ -1965,25 +1534,13 @@ static gboolean parse_player_metadata(struct media_player *mp,
 		g_hash_table_insert(mp->track, g_strdup("Title"),
 								g_strdup(""));
 
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	if (send_track_changed_event) {
-		uid = get_uid(mp);
-		avrcp_player_event(mp->player,
-			AVRCP_EVENT_TRACK_CHANGED, &uid);
-		send_track_changed_event = FALSE;
-
-		playback_position = get_position(mp);
-		avrcp_player_event(mp->player,
-			AVRCP_EVENT_PLAYBACK_POS_CHANGED, &playback_position);
-	}
-#else
 	mp->position = 0;
 	g_timer_start(mp->timer);
 	uid = get_uid(mp);
 
 	avrcp_player_event(mp->player, AVRCP_EVENT_TRACK_CHANGED, &uid);
 	avrcp_player_event(mp->player, AVRCP_EVENT_TRACK_REACHED_START, NULL);
-#endif
+
 	return TRUE;
 }
 
@@ -2234,10 +1791,6 @@ static struct media_player *media_player_create(struct media_adapter *adapter,
 
 	mp->settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
 								g_free);
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	mp->track = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-								g_free);
-#endif
 
 	adapter->players = g_slist_append(adapter->players, mp);
 
@@ -2307,461 +1860,6 @@ static DBusMessage *unregister_player(DBusConnection *conn, DBusMessage *msg,
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
 
-static void app_free(void *data)
-{
-	struct media_app *app = data;
-
-	queue_destroy(app->endpoints, media_endpoint_remove);
-	queue_destroy(app->players, media_player_remove);
-
-	if (app->client) {
-		g_dbus_client_set_disconnect_watch(app->client, NULL, NULL);
-		g_dbus_client_set_proxy_handlers(app->client, NULL, NULL,
-								NULL, NULL);
-		g_dbus_client_set_ready_watch(app->client, NULL, NULL);
-		g_dbus_client_unref(app->client);
-	}
-
-	if (app->reg)
-		dbus_message_unref(app->reg);
-
-	g_free(app->sender);
-	g_free(app->path);
-
-	free(app);
-}
-
-static void client_disconnect_cb(DBusConnection *conn, void *user_data)
-{
-	struct media_app *app = user_data;
-	struct media_adapter *adapter = app->adapter;
-
-	DBG("Client disconnected");
-
-	if (queue_remove(adapter->apps, app))
-		app_free(app);
-}
-
-static void app_register_endpoint(void *data, void *user_data)
-{
-	struct media_app *app = user_data;
-	GDBusProxy *proxy = data;
-	const char *iface = g_dbus_proxy_get_interface(proxy);
-	const char *path = g_dbus_proxy_get_path(proxy);
-	const char *uuid;
-	gboolean delay_reporting = FALSE;
-	uint8_t codec;
-	uint8_t *capabilities = NULL;
-	int size = 0;
-	DBusMessageIter iter, array;
-	struct media_endpoint *endpoint;
-
-	if (app->err)
-		return;
-
-	if (strcmp(iface, MEDIA_ENDPOINT_INTERFACE))
-		return;
-
-	/* Parse properties */
-	if (!g_dbus_proxy_get_property(proxy, "UUID", &iter))
-		goto fail;
-
-	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING)
-		goto fail;
-
-	dbus_message_iter_get_basic(&iter, &uuid);
-
-	if (!g_dbus_proxy_get_property(proxy, "Codec", &iter))
-		goto fail;
-
-	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_BYTE)
-		goto fail;
-
-	dbus_message_iter_get_basic(&iter, &codec);
-
-	/* DelayReporting and Capabilities are considered optional */
-	if (g_dbus_proxy_get_property(proxy, "DelayReporting", &iter))	{
-		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_BOOLEAN)
-			goto fail;
-
-		dbus_message_iter_get_basic(&iter, &delay_reporting);
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "Capabilities", &iter)) {
-		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY)
-			goto fail;
-
-		dbus_message_iter_recurse(&iter, &array);
-		dbus_message_iter_get_fixed_array(&array, &capabilities, &size);
-	}
-
-	endpoint = media_endpoint_create(app->adapter, app->sender, path, uuid,
-					delay_reporting, codec, capabilities,
-					size, &app->err);
-	if (!endpoint) {
-		error("Unable to register endpoint %s:%s: %s", app->sender,
-						path, strerror(-app->err));
-		return;
-	}
-
-	queue_push_tail(app->endpoints, endpoint);
-
-	return;
-
-fail:
-	app->err = -EINVAL;
-}
-
-static void app_register_player(void *data, void *user_data)
-{
-	struct media_app *app = user_data;
-	GDBusProxy *proxy = data;
-	const char *iface = g_dbus_proxy_get_interface(proxy);
-	const char *path = g_dbus_proxy_get_path(proxy);
-	struct media_player *player;
-	DBusMessageIter iter;
-
-	if (app->err)
-		return;
-
-	if (strcmp(iface, MEDIA_PLAYER_INTERFACE))
-		return;
-
-	player = media_player_create(app->adapter, app->sender, path,
-							&app->err);
-	if (!player)
-		return;
-
-	if (g_dbus_proxy_get_property(proxy, "PlaybackStatus", &iter)) {
-		if (!set_status(player, &iter))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "Position", &iter)) {
-		if (!set_position(player, &iter))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "Metadata", &iter)) {
-		if (!parse_player_metadata(player, &iter))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "Shuffle", &iter)) {
-		if (!set_shuffle(player, &iter))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "LoopStatus", &iter)) {
-		if (!set_repeat(player, &iter))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "CanPlay", &iter)) {
-		if (!set_flag(player, &iter, &player->play))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "CanPause", &iter)) {
-		if (!set_flag(player, &iter, &player->pause))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "CanGoNext", &iter)) {
-		if (!set_flag(player, &iter, &player->next))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "CanGoPrevious", &iter)) {
-		if (!set_flag(player, &iter, &player->previous))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "CanControl", &iter)) {
-		if (!set_flag(player, &iter, &player->control))
-			goto fail;
-	}
-
-	if (g_dbus_proxy_get_property(proxy, "Identity", &iter)) {
-		if (!set_name(player, &iter))
-			goto fail;
-	}
-
-	queue_push_tail(app->players, player);
-
-	return;
-fail:
-	app->err = -EINVAL;
-	error("Unable to register player %s:%s: %s", app->sender, path,
-							strerror(-app->err));
-	media_player_destroy(player);
-}
-
-static void remove_app(void *data)
-{
-	struct media_app *app = data;
-
-	/*
-	 * Set callback to NULL to avoid potential race condition
-	 * when calling remove_app and GDBusClient unref.
-	 */
-	g_dbus_client_set_disconnect_watch(app->client, NULL, NULL);
-
-	/*
-	 * Set proxy handlers to NULL, so that this gets called only once when
-	 * the first proxy that belongs to this service gets removed.
-	 */
-	g_dbus_client_set_proxy_handlers(app->client, NULL, NULL, NULL, NULL);
-
-
-	queue_remove(app->adapter->apps, app);
-
-	app_free(app);
-}
-
-static void client_ready_cb(GDBusClient *client, void *user_data)
-{
-	struct media_app *app = user_data;
-	DBusMessage *reply;
-	bool fail = false;
-
-	/*
-	 * Process received objects
-	 */
-	if (queue_isempty(app->proxies)) {
-		error("No object received");
-		fail = true;
-		reply = btd_error_failed(app->reg, "No object received");
-		goto reply;
-	}
-
-	queue_foreach(app->proxies, app_register_endpoint, app);
-	queue_foreach(app->proxies, app_register_player, app);
-
-	if (app->err) {
-		if (app->err == -EPROTONOSUPPORT)
-			reply = btd_error_not_supported(app->reg);
-		else
-			reply = btd_error_invalid_args(app->reg);
-		goto reply;
-	}
-
-	if ((queue_isempty(app->endpoints) && queue_isempty(app->players))) {
-		error("No valid external Media objects found");
-		fail = true;
-		reply = btd_error_failed(app->reg,
-					"No valid media object found");
-		goto reply;
-	}
-
-	DBG("Media application registered: %s:%s", app->sender, app->path);
-
-	reply = dbus_message_new_method_return(app->reg);
-
-reply:
-	g_dbus_send_message(btd_get_dbus_connection(), reply);
-	dbus_message_unref(app->reg);
-	app->reg = NULL;
-
-	if (fail)
-		remove_app(app);
-}
-
-static void proxy_added_cb(GDBusProxy *proxy, void *user_data)
-{
-	struct media_app *app = user_data;
-	const char *iface, *path;
-
-	if (app->err)
-		return;
-
-	queue_push_tail(app->proxies, proxy);
-
-	iface = g_dbus_proxy_get_interface(proxy);
-	path = g_dbus_proxy_get_path(proxy);
-
-	DBG("Proxy added: %s, iface: %s", path, iface);
-}
-
-static bool match_endpoint_by_path(const void *a, const void *b)
-{
-	const struct media_endpoint *endpoint = a;
-	const char *path = b;
-
-	return !strcmp(endpoint->path, path);
-}
-
-static bool match_player_by_path(const void *a, const void *b)
-{
-	const struct media_player *player = a;
-	const char *path = b;
-
-	return !strcmp(player->path, path);
-}
-
-static void proxy_removed_cb(GDBusProxy *proxy, void *user_data)
-{
-	struct media_app *app = user_data;
-	struct media_endpoint *endpoint;
-	struct media_player *player;
-	const char *iface, *path;
-
-	iface = g_dbus_proxy_get_interface(proxy);
-	path = g_dbus_proxy_get_path(proxy);
-
-	if (!strcmp(iface, MEDIA_ENDPOINT_INTERFACE)) {
-		endpoint = queue_remove_if(app->endpoints,
-						match_endpoint_by_path,
-						(void *) path);
-		if (!endpoint)
-			return;
-
-		if (!g_slist_find(app->adapter->endpoints, endpoint))
-			return;
-
-		DBG("Proxy removed - removing endpoint: %s", endpoint->path);
-
-		media_endpoint_remove(endpoint);
-	} else if (!strcmp(iface, MEDIA_PLAYER_INTERFACE)) {
-		player = queue_remove_if(app->players, match_player_by_path,
-						(void *) path);
-		if (!player)
-			return;
-
-		if (!g_slist_find(app->adapter->players, player))
-			return;
-
-		DBG("Proxy removed - removing player: %s", player->path);
-
-		media_player_remove(player);
-	}
-}
-
-static struct media_app *create_app(DBusConnection *conn, DBusMessage *msg,
-							const char *path)
-{
-	struct media_app *app;
-	const char *sender = dbus_message_get_sender(msg);
-
-	if (!path || !g_str_has_prefix(path, "/"))
-		return NULL;
-
-	app = new0(struct media_app, 1);
-
-	app->client = g_dbus_client_new_full(conn, sender, path, path);
-	if (!app->client)
-		goto fail;
-
-	app->sender = g_strdup(sender);
-	if (!app->sender)
-		goto fail;
-
-	app->path = g_strdup(path);
-	if (!app->path)
-		goto fail;
-
-	app->proxies = queue_new();
-	app->endpoints = queue_new();
-	app->players = queue_new();
-	app->reg = dbus_message_ref(msg);
-
-	g_dbus_client_set_disconnect_watch(app->client, client_disconnect_cb,
-									app);
-	g_dbus_client_set_proxy_handlers(app->client, proxy_added_cb,
-					proxy_removed_cb, NULL, app);
-	g_dbus_client_set_ready_watch(app->client, client_ready_cb, app);
-
-	return app;
-
-fail:
-	app_free(app);
-	return NULL;
-}
-
-struct match_data {
-	const char *path;
-	const char *sender;
-};
-
-static bool match_app(const void *a, const void *b)
-{
-	const struct media_app *app = a;
-	const struct match_data *data = b;
-
-	return g_strcmp0(app->path, data->path) == 0 &&
-				g_strcmp0(app->sender, data->sender) == 0;
-}
-
-static DBusMessage *register_app(DBusConnection *conn, DBusMessage *msg,
-							void *user_data)
-{
-	struct media_adapter *adapter = user_data;
-	const char *sender = dbus_message_get_sender(msg);
-	DBusMessageIter args;
-	const char *path;
-	struct media_app *app;
-	struct match_data match_data;
-
-	if (!dbus_message_iter_init(msg, &args))
-		return btd_error_invalid_args(msg);
-
-	if (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_OBJECT_PATH)
-		return btd_error_invalid_args(msg);
-
-	dbus_message_iter_get_basic(&args, &path);
-
-	match_data.path = path;
-	match_data.sender = sender;
-
-	if (queue_find(adapter->apps, match_app, &match_data))
-		return btd_error_already_exists(msg);
-
-	dbus_message_iter_next(&args);
-	if (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY)
-		return btd_error_invalid_args(msg);
-
-	app = create_app(conn, msg, path);
-	if (!app)
-		return btd_error_failed(msg, "Failed to register application");
-
-	DBG("Registering application: %s:%s", sender, path);
-
-	app->adapter = adapter;
-	queue_push_tail(adapter->apps, app);
-
-	return NULL;
-}
-
-static DBusMessage *unregister_app(DBusConnection *conn, DBusMessage *msg,
-							void *user_data)
-{
-	struct media_adapter *adapter = user_data;
-	const char *sender = dbus_message_get_sender(msg);
-	const char *path;
-	DBusMessageIter args;
-	struct media_app *app;
-	struct match_data match_data;
-
-	if (!dbus_message_iter_init(msg, &args))
-		return btd_error_invalid_args(msg);
-
-	if (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_OBJECT_PATH)
-		return btd_error_invalid_args(msg);
-
-	dbus_message_iter_get_basic(&args, &path);
-
-	match_data.path = path;
-	match_data.sender = sender;
-
-	app = queue_remove_if(adapter->apps, match_app, &match_data);
-	if (!app)
-		return btd_error_does_not_exist(msg);
-
-	app_free(app);
-
-	return dbus_message_new_method_return(msg);
-}
-
 static const GDBusMethodTable media_methods[] = {
 	{ GDBUS_METHOD("RegisterEndpoint",
 		GDBUS_ARGS({ "endpoint", "o" }, { "properties", "a{sv}" }),
@@ -2773,17 +1871,6 @@ static const GDBusMethodTable media_methods[] = {
 		NULL, register_player) },
 	{ GDBUS_METHOD("UnregisterPlayer",
 		GDBUS_ARGS({ "player", "o" }), NULL, unregister_player) },
-#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
-	{ GDBUS_METHOD("SelectRole",
-		GDBUS_ARGS({ "role", "s" }), NULL, a2dp_select_role) },
-#endif
-	{ GDBUS_ASYNC_METHOD("RegisterApplication",
-					GDBUS_ARGS({ "application", "o" },
-						{ "options", "a{sv}" }),
-					NULL, register_app) },
-	{ GDBUS_ASYNC_METHOD("UnregisterApplication",
-					GDBUS_ARGS({ "application", "o" }),
-					NULL, unregister_app) },
 	{ },
 };
 

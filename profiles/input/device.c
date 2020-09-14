@@ -87,9 +87,6 @@ struct input_device {
 	uint8_t			report_req_pending;
 	guint			report_req_timer;
 	uint32_t		report_rsp_id;
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	char *role;
-#endif
 };
 
 static int idle_timeout = 0;
@@ -336,12 +333,8 @@ static gboolean intr_watch_cb(GIOChannel *chan, GIOCondition cond, gpointer data
 	btd_service_disconnecting_complete(idev->service, 0);
 
 	/* Enter the auto-reconnect mode if needed */
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	if (idev->role == NULL)
-		input_device_enter_reconnect_mode(idev);
-#else
 	input_device_enter_reconnect_mode(idev);
-#endif
+
 	return FALSE;
 }
 
@@ -1008,21 +1001,10 @@ cleanup:
 
 static bool is_connected(struct input_device *idev)
 {
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	if (idev->role == NULL) {
-		if (idev->uhid)
-			return (idev->intr_io != NULL && idev->ctrl_io != NULL);
-		else
-			return ioctl_is_connected(idev);
-	} else {
-		return (idev->intr_io != NULL && idev->ctrl_io != NULL);
-	}
-#else
 	if (idev->uhid)
 		return (idev->intr_io != NULL && idev->ctrl_io != NULL);
 	else
 		return ioctl_is_connected(idev);
-#endif
 }
 
 static int connection_disconnect(struct input_device *idev, uint32_t flags)
@@ -1036,10 +1018,6 @@ static int connection_disconnect(struct input_device *idev, uint32_t flags)
 	if (idev->ctrl_io)
 		g_io_channel_shutdown(idev->ctrl_io, TRUE, NULL);
 
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	if (idev->role != NULL)
-		btd_service_disconnecting_complete(idev->service, 0);
-#endif
 	if (idev->uhid)
 		return 0;
 	else
@@ -1052,17 +1030,10 @@ static int input_device_connected(struct input_device *idev)
 
 	if (idev->intr_io == NULL || idev->ctrl_io == NULL)
 		return -ENOTCONN;
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	if (idev->role == NULL) {
-		err = hidp_add_connection(idev);
-		if (err < 0)
-			return err;
-	}
-#else
+
 	err = hidp_add_connection(idev);
 	if (err < 0)
 		return err;
-#endif
 
 	btd_service_connecting_complete(idev->service, 0);
 
@@ -1080,19 +1051,11 @@ static void interrupt_connect_cb(GIOChannel *chan, GError *conn_err,
 		err = -EIO;
 		goto failed;
 	}
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	if (idev->role == NULL) {
-		err = input_device_connected(idev);
-		if (err < 0)
-			goto failed;
-	} else {
-		btd_service_connecting_complete(idev->service, 0);
-	}
-#else
+
 	err = input_device_connected(idev);
 	if (err < 0)
 		goto failed;
-#endif
+
 	if (idev->uhid)
 		cond |= G_IO_IN;
 
@@ -1270,9 +1233,7 @@ int input_device_connect(struct btd_service *service)
 	DBG("");
 
 	idev = btd_service_get_user_data(service);
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	DBG("Role=%s", idev->role);
-#endif
+
 	if (idev->ctrl_io)
 		return -EBUSY;
 
@@ -1293,9 +1254,7 @@ int input_device_disconnect(struct btd_service *service)
 
 	flags = device_is_temporary(idev->device) ?
 					(1 << HIDP_VIRTUAL_CABLE_UNPLUG) : 0;
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-	DBG("Role=%s", idev->role);
-#endif
+
 	err = connection_disconnect(idev, flags);
 	if (err < 0)
 		return err;
@@ -1372,27 +1331,6 @@ static struct input_device *input_device_new(struct btd_service *service)
 	return idev;
 }
 
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-static struct input_device *input_device_role_new(struct btd_service *service)
-{
-	struct btd_device *device = btd_service_get_device(service);
-	const char *path = device_get_path(device);
-	struct btd_adapter *adapter = device_get_adapter(device);
-	struct input_device *idev;
-
-	idev = g_new0(struct input_device, 1);
-	bacpy(&idev->src, btd_adapter_get_address(adapter));
-	bacpy(&idev->dst, device_get_address(device));
-	idev->service = btd_service_ref(service);
-	idev->device = btd_device_ref(device);
-	idev->path = g_strdup(path);
-	idev->role = g_strdup("device");
-	idev->disable_sdp = 0;
-	idev->uhid = NULL;
-	return idev;
-}
-#endif
-
 static gboolean property_get_reconnect_mode(
 					const GDBusPropertyTable *property,
 					DBusMessageIter *iter, void *data)
@@ -1409,37 +1347,6 @@ static const GDBusPropertyTable input_properties[] = {
 	{ "ReconnectMode", "s", property_get_reconnect_mode },
 	{ }
 };
-
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-static DBusMessage *hid_device_fd(DBusConnection *conn,
-					DBusMessage *msg, void *user_data)
-{
-	struct input_device *idev = user_data;
-	GError *gerr = NULL;
-	DBusMessage *reply;
-	int ctrl_fd = -1;
-	int intr_fd = -1;
-	if (idev->ctrl_io == NULL || idev->intr_io == NULL) {
-		DBG("Return error reply");
-		reply = g_dbus_create_error(msg, ERROR_INTERFACE ".InputError",
-					"%s", "NotConnected");
-		g_error_free(gerr);
-	} else {
-		ctrl_fd = g_io_channel_unix_get_fd(idev->ctrl_io);
-		intr_fd = g_io_channel_unix_get_fd(idev->intr_io);
-		reply = g_dbus_create_reply(msg, DBUS_TYPE_UNIX_FD,
-							&ctrl_fd, DBUS_TYPE_UNIX_FD, &intr_fd ,DBUS_TYPE_INVALID);
-	}
-
-	return reply;
-}
-static const GDBusMethodTable input_device_methods[] = {
-	{ GDBUS_ASYNC_METHOD("GetFD",
-			NULL, GDBUS_ARGS({ "fd", "h" } , {"fd", "h"}),
-			hid_device_fd) },
-	{ }
-};
-#endif
 
 int input_device_register(struct btd_service *service)
 {
@@ -1477,34 +1384,6 @@ int input_device_register(struct btd_service *service)
 	return 0;
 }
 
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-int input_device_role_register(struct btd_service *service)
-{
-	struct btd_device *device = btd_service_get_device(service);
-	const char *path = device_get_path(device);
-	struct input_device *idev;
-
-	DBG("%s", path);
-
-	idev = input_device_role_new(service);
-	if (!idev)
-		return -EINVAL;
-	if (g_dbus_register_interface(btd_get_dbus_connection(),
-					idev->path, INPUT_INTERFACE,
-					input_device_methods, NULL,
-					NULL, idev,
-					NULL) == FALSE) {
-		error("Unable to register %s interface", INPUT_INTERFACE);
-		input_device_free(idev);
-		return -EINVAL;
-	}
-	btd_service_set_user_data(service, idev);
-
-	return 0;
-}
-
-#endif
-
 static struct input_device *find_device(const bdaddr_t *src,
 					const bdaddr_t *dst)
 {
@@ -1522,31 +1401,6 @@ static struct input_device *find_device(const bdaddr_t *src,
 	return btd_service_get_user_data(service);
 }
 
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-static struct input_device *find_device_role(const bdaddr_t *src,
-					const bdaddr_t *dst)
-{
-	struct btd_device *device;
-	struct btd_service *service;
-
-	device = btd_adapter_find_device(adapter_find(src), dst, BDADDR_BREDR);
-	if (device == NULL)
-		return NULL;
-
-	service = btd_device_get_service(device, HID_DEVICE_UUID);
-	if (service == NULL) {
-		DBG("Service not found, Probe Hid device profile for device");
-		/* This will make sure we have hid device service for device */
-		device_probe_profiles(device, NULL);
-		service = btd_device_get_service(device, HID_DEVICE_UUID);
-		if (service == NULL)
-			return NULL;
-	}
-
-	return btd_service_get_user_data(service);
-}
-#endif
-
 void input_device_unregister(struct btd_service *service)
 {
 	struct btd_device *device = btd_service_get_device(service);
@@ -1560,19 +1414,6 @@ void input_device_unregister(struct btd_service *service)
 
 	input_device_free(idev);
 }
-
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-void input_device_role_unregister(struct btd_service *service)
-{
-	struct btd_device *device = btd_service_get_device(service);
-	const char *path = device_get_path(device);
-	struct input_device *idev = btd_service_get_user_data(service);
-
-	DBG("%s", path);
-
-	input_device_free(idev);
-}
-#endif
 
 static int input_device_connadd(struct input_device *idev)
 {
@@ -1604,16 +1445,6 @@ bool input_device_exists(const bdaddr_t *src, const bdaddr_t *dst)
 
 	return false;
 }
-
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-bool input_device_role_exists(const bdaddr_t *src, const bdaddr_t *dst)
-{
-	if (find_device_role(src, dst))
-		return true;
-
-	return false;
-}
-#endif
 
 int input_device_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
 								GIOChannel *io)
@@ -1651,58 +1482,6 @@ int input_device_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
 
 	return 0;
 }
-
-#ifdef TIZEN_BT_HID_DEVICE_ENABLE
-int input_device_role_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
-								GIOChannel *io)
-{
-	struct input_device *idev = find_device_role(src, dst);
-	GIOCondition cond = G_IO_HUP | G_IO_ERR | G_IO_NVAL;
-
-	DBG("idev %p psm %d", idev, psm);
-
-	if (!idev)
-		return -ENOENT;
-
-	switch (psm) {
-	case L2CAP_PSM_HIDP_CTRL:
-		if (idev->ctrl_io)
-			return -EALREADY;
-		idev->ctrl_io = g_io_channel_ref(io);
-		idev->ctrl_watch = g_io_add_watch(idev->ctrl_io, cond,
-							ctrl_watch_cb, idev);
-		break;
-	case L2CAP_PSM_HIDP_INTR:
-		if (idev->intr_io)
-			return -EALREADY;
-		idev->intr_io = g_io_channel_ref(io);
-		idev->intr_watch = g_io_add_watch(idev->intr_io, cond,
-							intr_watch_cb, idev);
-		break;
-	}
-	if (idev->intr_io && idev->ctrl_io) {
-		btd_service_connecting_complete(idev->service, 0);
-	}
-	return 0;
-}
-
-int input_device_role_close_channels(const bdaddr_t *src, const bdaddr_t *dst)
-{
-	struct input_device *idev = find_device_role(src, dst);
-
-	if (!idev)
-		return -ENOENT;
-
-	if (idev->intr_io)
-		g_io_channel_shutdown(idev->intr_io, TRUE, NULL);
-
-	if (idev->ctrl_io)
-		g_io_channel_shutdown(idev->ctrl_io, TRUE, NULL);
-
-	return 0;
-}
-
-#endif
 
 int input_device_close_channels(const bdaddr_t *src, const bdaddr_t *dst)
 {
