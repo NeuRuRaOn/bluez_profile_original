@@ -52,8 +52,17 @@ struct media_player_callback {
 	int (*stop) (struct media_player *mp, void *user_data);
 	int (*next) (struct media_player *mp, void *user_data);
 	int (*previous) (struct media_player *mp, void *user_data);
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	int (*press_fast_forward) (struct media_player *mp, void *user_data);
+	int (*release_fast_forward) (struct media_player *mp, void *user_data);
+	int (*press_rewind) (struct media_player *mp, void *user_data);
+	int (*release_rewind) (struct media_player *mp, void *user_data);
+	int (*volume_up) (struct media_player *mp, void *user_data);
+	int (*volume_down) (struct media_player *mp, void *user_data);
+#else
 	int (*fast_forward) (struct media_player *mp, void *user_data);
 	int (*rewind) (struct media_player *mp, void *user_data);
+#endif
 	int (*list_items) (struct media_player *mp, const char *name,
 				uint32_t start, uint32_t end, void *user_data);
 	int (*change_folder) (struct media_player *mp, const char *path,

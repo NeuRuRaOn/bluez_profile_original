@@ -296,6 +296,9 @@ static struct {
 	{ "GREEN",		AVC_GREEN,		KEY_GREEN },
 	{ "BLUE",		AVC_BLUE,		KEY_BLUE },
 	{ "YELLOW",		AVC_YELLOW,		KEY_YELLOW },
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	{ "ABS VOLUME",         AVC_ABS_VOLUME,         ABS_VOLUME },
+#endif
 	{ NULL }
 };
 
@@ -333,15 +336,30 @@ static void send_key(int fd, uint16_t key, int pressed)
 static gboolean auto_release(gpointer user_data)
 {
 	struct avctp *session = user_data;
-
-	session->key.timer = 0;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	uint16_t op = session->key.op;
+#endif
 
 	DBG("AV/C: key press timeout");
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (op != KEY_FASTFORWARD && op != KEY_REWIND) {
+		session->key.timer = 0;
+		send_key(session->uinput, op, 0);
+	} else {
+		return TRUE;
+	}
+#else
+	session->key.timer = 0;
 	send_key(session->uinput, session->key.op, 0);
+#endif
 
 	return FALSE;
 }
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+extern void avrcp_stop_position_timer(void);
+#endif
 
 static void handle_press(struct avctp *session, uint16_t op)
 {
@@ -351,8 +369,9 @@ static void handle_press(struct avctp *session, uint16_t op)
 		/* Only auto release if keys are different */
 		if (session->key.op == op)
 			goto done;
-
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 		send_key(session->uinput, session->key.op, 0);
+#endif
 	}
 
 	session->key.op = op;
@@ -373,6 +392,9 @@ static void handle_release(struct avctp *session, uint16_t op)
 
 	send_key(session->uinput, op, 0);
 }
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+extern void avrcp_stop_position_timer(void);
+#endif
 
 static size_t handle_panel_passthrough(struct avctp *session,
 					uint8_t transaction, uint8_t *code,
@@ -427,9 +449,13 @@ static size_t handle_panel_passthrough(struct avctp *session,
 			break;
 		}
 
-		if (pressed)
+		if (pressed) {
 			handle_press(session, key_map[i].uinput);
-		else
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+			if (key_map[i].avc == AVC_REWIND)
+				avrcp_stop_position_timer();
+#endif
+		} else
 			handle_release(session, key_map[i].uinput);
 
 		break;
@@ -871,6 +897,34 @@ static int process_browsing(void *data)
 
 static gboolean process_queue(void *user_data)
 {
+        struct avctp_queue *queue = user_data;
+        struct avctp_pending_req *p = queue->p;
+
+        queue->process_id = 0;
+
+        if (p != NULL)
+                return FALSE;
+
+        while ((p = g_queue_pop_head(queue->queue))) {
+
+                if (p->process(p->data) == 0)
+                        break;
+
+                pending_destroy(p, NULL);
+        }
+
+        if (p == NULL)
+                return FALSE;
+
+        queue->p = p;
+
+        return FALSE;
+
+}
+
+#if 0
+static gboolean process_queue(void *user_data)
+{
 	struct avctp_queue *queue = user_data;
 	struct avctp_pending_req *p = queue->p;
 
@@ -891,10 +945,14 @@ static gboolean process_queue(void *user_data)
 		return FALSE;
 
 	queue->p = p;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	p->timeout = g_timeout_add_seconds(5, req_timeout, chan);
+#endif
 
 	return FALSE;
 
 }
+#endif
 
 static void control_response(struct avctp_channel *control,
 					struct avctp_header *avctp,
@@ -1201,6 +1259,9 @@ static int uinput_create(char *name)
 	ioctl(fd, UI_SET_EVBIT, EV_REL);
 	ioctl(fd, UI_SET_EVBIT, EV_REP);
 	ioctl(fd, UI_SET_EVBIT, EV_SYN);
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	ioctl(fd, UI_SET_EVBIT, EV_ABS);
+#endif
 
 	for (i = 0; key_map[i].name != NULL; i++)
 		ioctl(fd, UI_SET_KEYBIT, key_map[i].uinput);
@@ -1231,6 +1292,12 @@ static void init_uinput(struct avctp *session)
 	}
 
 	ba2str(device_get_address(session->device), address);
+	/*
+	 * Make sucre address to prevent to print privacy log
+	 */
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	address[6] = address[7] = address[9] = address[10] = 'X';
+#endif
 	session->uinput = uinput_create(address);
 	if (session->uinput < 0)
 		error("AVRCP: failed to init uinput for %s", address);
@@ -1367,7 +1434,7 @@ static void avctp_connect_cb(GIOChannel *chan, GError *err, gpointer data)
 	bt_io_get(chan, &gerr,
 			BT_IO_OPT_DEST, &address,
 			BT_IO_OPT_IMTU, &imtu,
-			BT_IO_OPT_IMTU, &omtu,
+			BT_IO_OPT_OMTU, &omtu,
 			BT_IO_OPT_INVALID);
 	if (gerr) {
 		avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
@@ -1506,9 +1573,15 @@ static void avctp_control_confirm(struct avctp *session, GIOChannel *chan,
 	src = btd_adapter_get_address(device_get_adapter(dev));
 	dst = device_get_address(dev);
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	session->auth_id = btd_request_authorization(src, dst,
+							AVRCP_TARGET_UUID,
+							auth_cb, session);
+#else
 	session->auth_id = btd_request_authorization(src, dst,
 							AVRCP_REMOTE_UUID,
 							auth_cb, session);
+#endif
 	if (session->auth_id == 0)
 		goto drop;
 
@@ -1534,6 +1607,8 @@ static void avctp_browsing_confirm(struct avctp *session, GIOChannel *chan,
 	if (bt_io_accept(chan, avctp_connect_browsing_cb, session, NULL,
 								&err)) {
 		avctp_set_state(session, AVCTP_STATE_BROWSING_CONNECTING, 0);
+		session->browsing = avctp_channel_create(session, chan, 1,
+							avctp_destroy_browsing);
 		return;
 	}
 
@@ -1571,6 +1646,21 @@ static void avctp_confirm_cb(GIOChannel *chan, gpointer data)
 								BDADDR_BREDR);
 	if (!device)
 		return;
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (device_is_profile_blocked(device, A2DP_SINK_UUID)) {
+		DBG("A2DP is restricted");
+		return;
+	}
+
+	char name[10];
+	device_get_name(device, name, sizeof(name));
+	DBG("name : %s", name);
+	if (g_str_equal(name, "PLT_M50")) {
+		DBG("Don't accept avrcp connection with this headset");
+		return;
+	}
+#endif
 
 	session = avctp_get_internal(device);
 	if (session == NULL)
@@ -1629,6 +1719,9 @@ int avctp_register(struct btd_adapter *adapter, gboolean master)
 		g_free(server);
 		return -1;
 	}
+
+/* Tizen doesn't support AVRCP BROWSING CHANNEL */
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	server->browsing_io = avctp_server_socket(src, master, L2CAP_MODE_ERTM,
 							AVCTP_BROWSING_PSM);
 	if (!server->browsing_io) {
@@ -1640,6 +1733,7 @@ int avctp_register(struct btd_adapter *adapter, gboolean master)
 		g_free(server);
 		return -1;
 	}
+#endif
 
 	server->adapter = btd_adapter_ref(adapter);
 
@@ -1661,9 +1755,17 @@ void avctp_unregister(struct btd_adapter *adapter)
 
 	servers = g_slist_remove(servers, server);
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (server->browsing_io) {
+		g_io_channel_shutdown(server->browsing_io, TRUE, NULL);
+		g_io_channel_unref(server->browsing_io);
+		server->browsing_io = NULL;
+	}
+#else
 	g_io_channel_shutdown(server->browsing_io, TRUE, NULL);
 	g_io_channel_unref(server->browsing_io);
 	server->browsing_io = NULL;
+#endif
 
 	g_io_channel_shutdown(server->control_io, TRUE, NULL);
 	g_io_channel_unref(server->control_io);
@@ -1820,13 +1922,20 @@ static gboolean repeat_timeout(gpointer user_data)
 	struct avctp *session = user_data;
 
 	avctp_passthrough_release(session, session->key.op);
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	avctp_passthrough_press(session, session->key.op);
 
 	return TRUE;
+#else
+	return FALSE;
+#endif
 }
 
 static void release_pressed(struct avctp *session)
 {
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (session->key.op != AVC_FAST_FORWARD && session->key.op != AVC_REWIND)
+#endif
 	avctp_passthrough_release(session, session->key.op);
 
 	if (session->key.timer > 0)
@@ -1878,6 +1987,51 @@ int avctp_send_passthrough(struct avctp *session, uint8_t op)
 
 	return avctp_passthrough_press(session, op);
 }
+
+#ifdef TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM
+static int avctp_passthrough_press_fast(struct avctp *session, uint8_t op)
+{
+	uint8_t operands[2];
+
+	DBG("%s", op2str(op));
+
+	/* Button pressed */
+	operands[0] = op & 0x7f;
+	operands[1] = 0;
+
+	return avctp_send_req(session, AVC_CTYPE_CONTROL,
+				AVC_SUBUNIT_PANEL, AVC_OP_PASSTHROUGH,
+				operands, sizeof(operands),
+				NULL, NULL);
+}
+
+int avctp_send_passthrough_send_fast(struct avctp *session, uint8_t op)
+{
+	/* Auto release if key pressed */
+	if (session->key.timer > 0)
+		release_pressed(session);
+
+	return avctp_passthrough_press_fast(session, op);
+}
+#endif
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+int avctp_send_release_passthrough(struct avctp *session, uint8_t op)
+{
+	DBG("+");
+
+	if (op != AVC_FAST_FORWARD && op != AVC_REWIND)
+		return FALSE;
+
+	/* Auto release if key pressed */
+	if (session->key.timer > 0)
+		g_source_remove(session->key.timer);
+	session->key.timer = 0;
+
+	DBG("-");
+	return avctp_passthrough_release(session, op);
+}
+#endif
 
 int avctp_send_vendordep(struct avctp *session, uint8_t transaction,
 				uint8_t code, uint8_t subunit,

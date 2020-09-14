@@ -54,6 +54,19 @@
 
 static int ctl;
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+/* Compatibility with old ioctls */
+#define OLD_BNEPCONADD      1
+#define OLD_BNEPCONDEL      2
+#define OLD_BNEPGETCONLIST  3
+#define OLD_BNEPGETCONINFO  4
+
+static unsigned long bnepconnadd;
+static unsigned long bnepconndel;
+static unsigned long bnepgetconnlist;
+static unsigned long bnepgetconninfo;
+#endif
+
 struct __service_16 {
 	uint16_t dst;
 	uint16_t src;
@@ -88,7 +101,30 @@ int bnep_init(void)
 
 		return err;
 	}
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+/* Temporary ioctl compatibility hack */
+{
+	struct bnep_connlist_req req;
+	struct bnep_conninfo ci[1];
 
+	req.cnum = 1;
+	req.ci   = ci;
+
+	if (!ioctl(ctl, BNEPGETCONNLIST, &req)) {
+		/* New ioctls */
+		bnepconnadd     = BNEPCONNADD;
+		bnepconndel     = BNEPCONNDEL;
+		bnepgetconnlist = BNEPGETCONNLIST;
+		bnepgetconninfo = BNEPGETCONNINFO;
+	} else {
+		/* Old ioctls */
+		bnepconnadd     = OLD_BNEPCONADD;
+		bnepconndel     = OLD_BNEPCONDEL;
+		bnepgetconnlist = OLD_BNEPGETCONLIST;
+		bnepgetconninfo = OLD_BNEPGETCONINFO;
+	}
+}
+#endif
 	return 0;
 }
 
@@ -178,6 +214,11 @@ static int bnep_if_down(const char *devname)
 	int sk, err = 0;
 
 	sk = socket(AF_INET, SOCK_DGRAM, 0);
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (sk < 0)
+		return -1;
+#endif
 
 	memset(&ifr, 0, sizeof(ifr));
 	strncpy(ifr.ifr_name, devname, IF_NAMESIZE - 1);
@@ -420,11 +461,12 @@ void bnep_disconnect(struct bnep *session)
 	if (!session)
 		return;
 
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	if (session->watch > 0) {
 		g_source_remove(session->watch);
 		session->watch = 0;
 	}
-
+#endif
 	if (session->io) {
 		g_io_channel_unref(session->io);
 		session->io = NULL;
@@ -434,6 +476,7 @@ void bnep_disconnect(struct bnep *session)
 	bnep_conndel(&session->dst_addr);
 }
 
+#ifndef  TIZEN_FEATURE_BLUEZ_MODIFY
 static int bnep_add_to_bridge(const char *devname, const char *bridge)
 {
 	int ifindex;
@@ -448,7 +491,15 @@ static int bnep_add_to_bridge(const char *devname, const char *bridge)
 	sk = socket(AF_INET, SOCK_STREAM, 0);
 	if (sk < 0)
 		return -1;
-
+#ifdef  TIZEN_FEATURE_BLUEZ_MODIFY
+	err = ioctl(sk, SIOCBRADDBR, bridge);
+	if (err < 0)
+	{
+		info("bridge create err: %d", err);
+		close(sk);
+		return -errno;
+	}
+#endif
 	memset(&ifr, 0, sizeof(ifr));
 	strncpy(ifr.ifr_name, bridge, IFNAMSIZ - 1);
 	ifr.ifr_ifindex = ifindex;
@@ -465,6 +516,7 @@ static int bnep_add_to_bridge(const char *devname, const char *bridge)
 
 	return err;
 }
+#endif
 
 static int bnep_del_from_bridge(const char *devname, const char *bridge)
 {
@@ -600,6 +652,20 @@ static uint16_t bnep_setup_decode(int sk, struct bnep_setup_conn_req *req,
 	return BNEP_CONN_INVALID_DST;
 }
 
+#ifdef  TIZEN_FEATURE_BLUEZ_MODIFY
+int bnep_if_down_wrapper(const char *devname)
+{
+	bnep_if_down(devname);
+	return 0;
+}
+
+int bnep_conndel_wrapper(const bdaddr_t *dst)
+{
+	bnep_conndel(dst);
+	return 0;
+}
+#endif
+
 static int bnep_server_add_legacy(int sk, uint16_t dst, char *bridge,
 					char *iface, const bdaddr_t *addr,
 					uint8_t *setup_data, int len)
@@ -620,12 +686,14 @@ static int bnep_server_add_legacy(int sk, uint16_t dst, char *bridge,
 		goto reply;
 	}
 
+#ifndef  TIZEN_FEATURE_BLUEZ_MODIFY
 	err = bnep_add_to_bridge(iface, bridge);
 	if (err < 0) {
 		bnep_conndel(addr);
 		rsp = BNEP_CONN_NOT_ALLOWED;
 		goto reply;
 	}
+#endif
 
 	err = bnep_if_up(iface);
 	if (err < 0) {
@@ -695,9 +763,11 @@ int bnep_server_add(int sk, char *bridge, char *iface, const bdaddr_t *addr,
 		goto failed;
 	}
 
+#ifndef  TIZEN_FEATURE_BLUEZ_MODIFY
 	err = bnep_add_to_bridge(iface, bridge);
 	if (err < 0)
 		goto failed_conn;
+#endif
 
 	err = bnep_if_up(iface);
 	if (err < 0)
@@ -708,7 +778,9 @@ int bnep_server_add(int sk, char *bridge, char *iface, const bdaddr_t *addr,
 failed_bridge:
 	bnep_del_from_bridge(iface, bridge);
 
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 failed_conn:
+#endif
 	bnep_conndel(addr);
 
 	return err;

@@ -41,12 +41,25 @@
 #include "lib/sdp_lib.h"
 #include "lib/uuid.h"
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+#include <sys/ioctl.h>
+#include <bluetooth/hci.h>
+#endif	/* TIZEN_FEATURE_BLUEZ_MODIFY */
+
 #include "btio/btio.h"
 #include "src/log.h"
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
 #include "src/adapter.h"
 #include "src/device.h"
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+#include "src/service.h"
+#include "../../profile.h"
+#ifdef TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM
+#include "avrcp.h"
+#endif
+#endif
 
 #include "avdtp.h"
 #include "sink.h"
@@ -85,11 +98,20 @@ static unsigned int seids;
 #define AVDTP_MSG_TYPE_ACCEPT			0x02
 #define AVDTP_MSG_TYPE_REJECT			0x03
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+#define REQ_TIMEOUT 10
+#else
 #define REQ_TIMEOUT 6
+#endif
 #define SUSPEND_TIMEOUT 10
 #define ABORT_TIMEOUT 2
 #define DISCONNECT_TIMEOUT 1
 #define START_TIMEOUT 1
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+struct avdtp *configured_session;
+struct avdtp_stream *configured_stream;
+#endif
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 
@@ -379,6 +401,13 @@ struct avdtp_stream {
 
 /* Structure describing an AVDTP connection between two devices */
 
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+struct avdtp_source_info {
+	struct btd_device *dev;
+	bool pause;
+};
+#endif
+
 struct avdtp {
 	unsigned int ref;
 
@@ -412,12 +441,17 @@ struct avdtp {
 	struct pending_req *req;
 
 	guint dc_timer;
+	int dc_timeout;
 
 	/* Attempt stream setup instead of disconnecting */
 	gboolean stream_setup;
 };
 
 static GSList *state_callbacks = NULL;
+
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+static GSList *list_source = NULL;
+#endif
 
 static int send_request(struct avdtp *session, gboolean priority,
 			struct avdtp_stream *stream, uint8_t signal_id,
@@ -434,6 +468,74 @@ static int process_queue(struct avdtp *session);
 static void avdtp_sep_set_state(struct avdtp *session,
 				struct avdtp_local_sep *sep,
 				avdtp_state_t state);
+
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+void avdtp_set_source_status(struct btd_device *dev, bool pause)
+{
+	GSList *l = list_source;
+
+	while (l) {
+		struct avdtp_source_info *ldev = l->data;
+
+		if (ldev->dev != dev && pause == false && ldev->pause == false) {
+			avrcp_pause(ldev->dev);
+			DBG("sending pause from status");
+			ldev->pause = true;
+		} else if (ldev->dev == dev) {
+			ldev->pause = pause;
+		}
+
+		l = l->next;
+	}
+}
+
+static void avdtp_add_source_device(struct btd_device *dev)
+{
+	bool found = false;
+	GSList *l = list_source;
+
+	while (l) {
+		struct avdtp_source_info *ldev = l->data;
+
+		if (ldev->dev == dev) {
+			DBG("in device %p", dev);
+			ldev->pause = false;
+			found = true;
+		} else {
+			if (ldev->pause == false) {
+				avrcp_pause(ldev->dev);
+				DBG("Sending pause from steam");
+				ldev->pause = true;
+			}
+		}
+
+		l = l->next;
+	}
+
+	if (!found) {
+		struct avdtp_source_info *p;
+
+		p = g_new0(struct avdtp_source_info, 1);
+		p->dev = dev;
+		p->pause = false;
+		list_source = g_slist_append(list_source, p);
+	}
+}
+
+static void avdtp_remove_source_devce(struct btd_device *dev)
+{
+	GSList *l;
+
+	for (l = list_source; l != NULL; l = l->next) {
+		struct avdtp_source_info *ldev = l->data;
+		if (ldev && ldev->dev == dev) {
+			list_source = g_slist_remove(list_source, ldev);
+			g_free(ldev);
+			return;
+		}
+	}
+}
+#endif
 
 static const char *avdtp_statestr(avdtp_state_t state)
 {
@@ -831,13 +933,23 @@ static void handle_transport_connect(struct avdtp *session, GIOChannel *io,
 		goto proceed;
 
 	DBG("sk %d, omtu %d, send buffer size %d", sk, omtu, buf_size);
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	min_buf_size = omtu * 10;
+#else
 	min_buf_size = omtu * 2;
+#endif
 	if (buf_size < min_buf_size) {
 		DBG("send buffer size to be increassed to %d",
 				min_buf_size);
 		set_send_buffer_size(sk, min_buf_size);
 	}
-
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	else {
+		DBG("send buffer size to be decreassed to %d",
+				min_buf_size);
+		set_send_buffer_size(sk, min_buf_size);
+	}
+#endif
 proceed:
 	if (!stream->open_acp && sep->cfm && sep->cfm->open)
 		sep->cfm->open(session, sep, stream, NULL, sep->user_data);
@@ -941,11 +1053,179 @@ static void handle_unanswered_req(struct avdtp *session,
 	pending_req_free(req);
 }
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+static gboolean send_broadcom_a2dp_qos(const bdaddr_t *dst, gboolean qos_high)
+{
+	int dd;
+	int err = 0;
+	struct hci_conn_info_req *cr;
+	broadcom_qos_cp cp;
+
+	dd = hci_open_dev(0);
+
+	if (dd < 0)
+		return FALSE;
+
+	cr = g_malloc0(sizeof(*cr) + sizeof(struct hci_conn_info));
+
+	cr->type = ACL_LINK;
+	bacpy(&cr->bdaddr, dst);
+
+	err = ioctl(dd, HCIGETCONNINFO, cr);
+	if (err < 0) {
+		error("Fail to get HCIGETCOINFO");
+		g_free(cr);
+		hci_close_dev(dd);
+		return FALSE;
+	}
+
+	cp.handle = cr->conn_info->handle;
+	DBG("Handle %d", cp.handle);
+	g_free(cr);
+
+	if (qos_high)
+		cp.priority = BRCM_QOS_PRIORITY_HIGH;
+	else
+		cp.priority = BRCM_QOS_PRIORITY_NORMAL;
+
+	if (hci_send_cmd(dd, OGF_VENDOR_CMD, BROADCOM_QOS_CMD,
+				BROADCOM_QOS_CP_SIZE, &cp) < 0) {
+		hci_close_dev(dd);
+		return FALSE;
+	}
+	DBG("Send Broadcom Qos Patch %s", qos_high ? "High" : "Low");
+
+	hci_close_dev(dd);
+
+	return TRUE;
+}
+
+static gboolean send_sprd_a2dp_qos(const bdaddr_t *dst, gboolean qos_high)
+{
+	int dd;
+	int err = 0;
+	struct hci_conn_info_req *cr;
+	qos_setup_cp cp;
+
+	dd = hci_open_dev(0);
+	if (dd < 0)
+		return FALSE;
+
+	cr = g_malloc0(sizeof(*cr) + sizeof(struct hci_conn_info));
+
+	cr->type = ACL_LINK;
+	bacpy(&cr->bdaddr, dst);
+
+	err = ioctl(dd, HCIGETCONNINFO, cr);
+	if (err < 0) {
+		error("Fail to get HCIGETCOINFO");
+		g_free(cr);
+		hci_close_dev(dd);
+		return FALSE;
+	}
+
+	cp.handle = cr->conn_info->handle;
+	cp.flags = 0x00;
+	DBG("Handle %d", cp.handle);
+	g_free(cr);
+
+	if (qos_high) {
+		cp.qos.service_type = 0x02;
+		cp.qos.token_rate = 0X000000C8;
+		cp.qos.peak_bandwidth = 0X000000C8;
+		cp.qos.latency = 0x00000001;
+		cp.qos.delay_variation = 0xFFFFFFFF;
+	} else {
+		cp.qos.service_type = 0x01;
+		cp.qos.token_rate = 0X00000000;
+		cp.qos.peak_bandwidth = 0X00000000;
+		cp.qos.latency = 0x00000001;
+		cp.qos.delay_variation = 0xFFFFFFFF;
+	}
+
+	if (hci_send_cmd(dd, OGF_LINK_POLICY, OCF_QOS_SETUP,
+				QOS_SETUP_CP_SIZE, &cp) < 0) {
+		hci_close_dev(dd);
+		return FALSE;
+	}
+	DBG("Send Spreadtrum Qos Patch %s", qos_high ? "High" : "Low");
+
+	hci_close_dev(dd);
+
+	return TRUE;
+}
+
+static gboolean fix_role_to_master(const bdaddr_t *dst, gboolean fix_to_master)
+{
+	int dd;
+	int err = 0;
+	struct hci_conn_info_req *cr;
+	switch_role_cp sr_cp;
+	write_link_policy_cp lp_cp;
+
+	dd = hci_open_dev(0);
+	if (dd < 0) {
+		error("hci_open_dev is failed");
+		return FALSE;
+	}
+
+	cr = g_malloc0(sizeof(*cr) + sizeof(struct hci_conn_info));
+
+	cr->type = ACL_LINK;
+	bacpy(&cr->bdaddr, dst);
+	err = ioctl(dd, HCIGETCONNINFO, cr);
+	if (err < 0) {
+		error("Fail to get HCIGETCOINFO : %d", err);
+		g_free(cr);
+		hci_close_dev(dd);
+		return FALSE;
+	}
+
+	if (!(cr->conn_info->link_mode & HCI_LM_MASTER) && fix_to_master) {
+		DBG("Need to role switch");
+
+		bacpy(&sr_cp.bdaddr, dst);
+		sr_cp.role = 0x00;	/* 0x00 : Master, 0x01 : Slave */
+		if (hci_send_cmd(dd, OGF_LINK_POLICY, OCF_SWITCH_ROLE,
+					SWITCH_ROLE_CP_SIZE, &sr_cp) < 0) {
+			error("switch role is failed");
+			g_free(cr);
+			hci_close_dev(dd);
+			return FALSE;
+		}
+	}
+
+	lp_cp.handle = cr->conn_info->handle;
+	DBG("Handle %d", lp_cp.handle);
+	g_free(cr);
+
+	lp_cp.policy = fix_to_master ? 0x00 : HCI_LP_SNIFF | HCI_LP_RSWITCH;
+	DBG("Request link policy : 0x%X", lp_cp.policy);
+
+	if (hci_send_cmd(dd, OGF_LINK_POLICY, OCF_WRITE_LINK_POLICY,
+				WRITE_LINK_POLICY_CP_SIZE, &lp_cp) < 0) {
+		error("write link policy is failed : %d", lp_cp.policy);
+		hci_close_dev(dd);
+		return FALSE;
+	}
+
+	hci_close_dev(dd);
+
+	return TRUE;
+}
+#endif	/* TIZEN_FEATURE_BLUEZ_MODIFY */
+
 static void avdtp_sep_set_state(struct avdtp *session,
 				struct avdtp_local_sep *sep,
 				avdtp_state_t state)
 {
 	struct avdtp_stream *stream = sep->stream;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	struct btd_adapter *adapter = device_get_adapter(session->device);
+	const bdaddr_t *dst;
+
+	dst = device_get_address(session->device);
+#endif
 	avdtp_state_t old_state;
 	struct avdtp_error err, *err_ptr = NULL;
 	GSList *l;
@@ -971,17 +1251,48 @@ static void avdtp_sep_set_state(struct avdtp *session,
 
 	switch (state) {
 	case AVDTP_STATE_CONFIGURED:
-		if (sep->info.type == AVDTP_SEP_TYPE_SINK)
+		if (sep->info.type == AVDTP_SEP_TYPE_SINK) {
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+			configured_session = session;
+			configured_stream = stream;
+#endif
 			avdtp_delay_report(session, stream, stream->delay);
+		}
 		break;
 	case AVDTP_STATE_OPEN:
 		stream->starting = FALSE;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+		if (TIZEN_FEATURE_BLUEZ_BRCM_QOS || TIZEN_FEATURE_BLUEZ_SPEAKER_REFERENCE) {
+			send_broadcom_a2dp_qos(dst, FALSE);
+		} else if (TIZEN_FEATURE_BLUEZ_SPRD_QOS) {
+			if (old_state == AVDTP_STATE_STREAMING)
+				send_sprd_a2dp_qos(dst, FALSE);
+		}
+
+		if (TIZEN_FEATURE_BLUEZ_ROLE_CHANGE)
+			fix_role_to_master(dst, FALSE);
+
+		btd_adapter_set_streaming_mode(adapter, dst, FALSE);
+#endif	/* TIZEN_FEATURE_BLUEZ_MODIFY */
 		break;
 	case AVDTP_STATE_STREAMING:
 		if (stream->start_timer) {
 			g_source_remove(stream->start_timer);
 			stream->start_timer = 0;
 		}
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+		if (TIZEN_FEATURE_BLUEZ_BRCM_QOS || TIZEN_FEATURE_BLUEZ_SPEAKER_REFERENCE) {
+			send_broadcom_a2dp_qos(dst, TRUE);
+		} else if (TIZEN_FEATURE_BLUEZ_SPRD_QOS) {
+			if (old_state == AVDTP_STATE_OPEN)
+				send_sprd_a2dp_qos(dst, TRUE);
+		}
+		if (TIZEN_FEATURE_BLUEZ_ROLE_CHANGE)
+			fix_role_to_master(dst, TRUE);
+
+		btd_adapter_set_streaming_mode(adapter, dst, TRUE);
+#endif	/* TIZEN_FEATURE_BLUEZ_MODIFY */
 		stream->open_acp = FALSE;
 		break;
 	case AVDTP_STATE_CLOSING:
@@ -1019,7 +1330,11 @@ static void avdtp_sep_set_state(struct avdtp *session,
 		stream_free(stream);
 }
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+void finalize_discovery(struct avdtp *session, int err)
+#else
 static void finalize_discovery(struct avdtp *session, int err)
+#endif
 {
 	struct discover_callback *discover = session->discover;
 	struct avdtp_error avdtp_err;
@@ -1042,6 +1357,11 @@ static void finalize_discovery(struct avdtp *session, int err)
 static void release_stream(struct avdtp_stream *stream, struct avdtp *session)
 {
 	struct avdtp_local_sep *sep = stream->lsep;
+
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+	/* Connection lost */
+	avdtp_remove_source_devce(session->device);
+#endif
 
 	if (sep->cfm && sep->cfm->abort &&
 				(sep->state != AVDTP_STATE_ABORTING ||
@@ -1103,12 +1423,20 @@ static void avdtp_free(void *data)
 static void connection_lost(struct avdtp *session, int err)
 {
 	char address[18];
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	struct btd_service *service;
+#endif
 
 	session = avdtp_ref(session);
 
 	ba2str(device_get_address(session->device), address);
 	DBG("Disconnected from %s", address);
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	service = btd_device_get_service(session->device, A2DP_SINK_UUID);
+	if (service)
+		btd_service_connecting_complete(service, -err);
+#endif
 	g_slist_foreach(session->streams, (GFunc) release_stream, session);
 	session->streams = NULL;
 
@@ -1116,14 +1444,44 @@ static void connection_lost(struct avdtp *session, int err)
 
 	avdtp_set_state(session, AVDTP_SESSION_STATE_DISCONNECTED);
 
+	DBG("%p: ref=%d", session, session->ref);
+
 	avdtp_unref(session);
 }
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+static gboolean disconnect_acl_timeout(gpointer user_data)
+{
+	struct btd_device *device = user_data;
+
+	DBG("");
+
+	btd_device_disconnect(device);
+
+	return FALSE;
+}
+#endif
 
 static gboolean disconnect_timeout(gpointer user_data)
 {
 	struct avdtp *session = user_data;
 	struct btd_service *service;
 	gboolean stream_setup;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	struct btd_device *device = NULL;
+	struct btd_adapter *adapter = NULL;
+	const bdaddr_t *bdaddr = NULL;
+
+	DBG("");
+#endif
+
+/* Fix : REVERSE_INULL */
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (session->device == NULL) {
+		error("session device NOT found");
+		return FALSE;
+	}
+#endif
 
 	session->dc_timer = 0;
 
@@ -1142,22 +1500,91 @@ static gboolean disconnect_timeout(gpointer user_data)
 		return FALSE;
 	}
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (session->device) {
+		adapter = device_get_adapter(session->device);
+		bdaddr = device_get_address(session->device);
+		if (adapter && bdaddr)
+			device = btd_adapter_find_device(adapter, bdaddr, BDADDR_BREDR);
+		if (!device)
+			error("device is NOT found");
+	}
+#endif
+
 	connection_lost(session, ETIMEDOUT);
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (device)
+		g_timeout_add(100,
+			disconnect_acl_timeout,
+			device);
+#endif
 
 	return FALSE;
 }
 
-static void set_disconnect_timer(struct avdtp *session)
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+static void set_disconnect_timer_for_sink(struct avdtp *session, gboolean disconn)
 {
+	char name[6];
+
 	if (session->dc_timer)
 		remove_disconnect_timer(session);
 
-	if (!session->stream_setup && !session->streams)
+	device_get_name(session->device, name, sizeof(name));
+	DBG("name : [%s]", name);
+	if (g_str_equal(name, "VW BT") || g_str_equal(name, "VW MI") ||
+						g_str_equal(name, "Seat ")) {
+		session->dc_timer = g_timeout_add_seconds(3, disconnect_timeout,
+				session);
+	} else if (g_str_equal(name, "CAR M")) {
+		session->dc_timer = g_timeout_add(200, disconnect_timeout,
+				session);
+	} else {
+		if (disconn == TRUE)
+			session->dc_timer = g_timeout_add(100,
+					disconnect_timeout,
+					session);
+		else
+			session->dc_timer = g_timeout_add_seconds(DISCONNECT_TIMEOUT,
+					disconnect_timeout,
+					session);
+	}
+}
+#endif
+
+static void set_disconnect_timer(struct avdtp *session)
+{
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	char name[6];
+#endif
+	if (session->dc_timer)
+		remove_disconnect_timer(session);
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	device_get_name(session->device, name, sizeof(name));
+	DBG("name : [%s]", name);
+	if (g_str_equal(name, "VW BT") || g_str_equal(name, "VW MI") ||
+						g_str_equal(name, "Seat ")) {
+		session->dc_timer = g_timeout_add_seconds(3, disconnect_timeout,
+				session);
+	} else if (g_str_equal(name, "CAR M")) {
+		session->dc_timer = g_timeout_add(200, disconnect_timeout,
+				session);
+	} else {
+		session->dc_timer = g_timeout_add_seconds(DISCONNECT_TIMEOUT,
+				disconnect_timeout,
+				session);
+	}
+#else
+	DBG("timeout %d", session->dc_timeout);
+	if (!session->dc_timeout)
 		session->dc_timer = g_idle_add(disconnect_timeout, session);
 	else
-		session->dc_timer = g_timeout_add_seconds(DISCONNECT_TIMEOUT,
+		session->dc_timer = g_timeout_add_seconds(session->dc_timeout,
 							disconnect_timeout,
 							session);
+#endif
 }
 
 void avdtp_unref(struct avdtp *session)
@@ -1166,6 +1593,10 @@ void avdtp_unref(struct avdtp *session)
 		return;
 
 	session->ref--;
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+	struct btd_adapter *adapter;
+	adapter = avdtp_get_adapter(session);
+#endif
 
 	DBG("%p: ref=%d", session, session->ref);
 
@@ -1174,7 +1605,14 @@ void avdtp_unref(struct avdtp *session)
 
 	switch (session->state) {
 	case AVDTP_SESSION_STATE_CONNECTED:
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+		if (btd_adapter_get_a2dp_role(adapter) == BLUETOOTH_A2DP_SINK_ROLE)
+			set_disconnect_timer_for_sink(session, TRUE);
+		else
+			set_disconnect_timer(session);
+#else
 		set_disconnect_timer(session);
+#endif
 		break;
 	case AVDTP_SESSION_STATE_CONNECTING:
 		connection_lost(session, ECONNABORTED);
@@ -1704,12 +2142,14 @@ failed:
 static gboolean avdtp_start_cmd(struct avdtp *session, uint8_t transaction,
 				struct start_req *req, unsigned int size)
 {
+
 	struct avdtp_local_sep *sep;
 	struct avdtp_stream *stream;
 	struct stream_rej rej;
 	struct seid *seid;
 	uint8_t err, failed_seid;
-	int seid_count, i;
+	int seid_count;
+	int i;
 
 	if (size < sizeof(struct start_req)) {
 		error("Too short start request");
@@ -1746,6 +2186,10 @@ static gboolean avdtp_start_cmd(struct avdtp *session, uint8_t transaction,
 
 		avdtp_check_collision(session, AVDTP_START, stream);
 
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+		avdtp_add_source_device(session->device);
+#endif
+
 		avdtp_sep_set_state(session, sep, AVDTP_STATE_STREAMING);
 	}
 
@@ -1767,6 +2211,10 @@ static gboolean avdtp_close_cmd(struct avdtp *session, uint8_t transaction,
 	struct avdtp_local_sep *sep;
 	struct avdtp_stream *stream;
 	uint8_t err;
+
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+	avdtp_remove_source_devce(session->device);
+#endif
 
 	if (size < sizeof(struct seid_req)) {
 		error("Too short close request");
@@ -1796,6 +2244,8 @@ static gboolean avdtp_close_cmd(struct avdtp *session, uint8_t transaction,
 	avdtp_check_collision(session, AVDTP_CLOSE, stream);
 
 	avdtp_sep_set_state(session, sep, AVDTP_STATE_CLOSING);
+
+	session->dc_timeout = DISCONNECT_TIMEOUT;
 
 	if (!avdtp_send(session, transaction, AVDTP_MSG_TYPE_ACCEPT,
 						AVDTP_CLOSE, NULL, 0))
@@ -1842,10 +2292,18 @@ static gboolean avdtp_suspend_cmd(struct avdtp *session, uint8_t transaction,
 
 		stream = sep->stream;
 
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+		if (sep->state != AVDTP_STATE_STREAMING) {
+			DBG("Not streaming state: %d", sep->state);
+			return avdtp_send(session, transaction, AVDTP_MSG_TYPE_ACCEPT,
+								AVDTP_SUSPEND, NULL, 0);
+		}
+#else
 		if (sep->state != AVDTP_STATE_STREAMING) {
 			err = AVDTP_BAD_STATE;
 			goto failed;
 		}
+#endif
 
 		if (sep->ind && sep->ind->suspend) {
 			if (!sep->ind->suspend(session, sep, stream, &err,
@@ -1893,8 +2351,10 @@ static gboolean avdtp_abort_cmd(struct avdtp *session, uint8_t transaction,
 
 	ret = avdtp_send(session, transaction, AVDTP_MSG_TYPE_ACCEPT,
 						AVDTP_ABORT, NULL, 0);
-	if (ret)
+	if (ret) {
 		avdtp_sep_set_state(session, sep, AVDTP_STATE_ABORTING);
+		session->dc_timeout = DISCONNECT_TIMEOUT;
+	}
 
 	return ret;
 }
@@ -2165,6 +2625,21 @@ static gboolean session_cb(GIOChannel *chan, GIOCondition cond,
 	}
 
 	if (session->in.message_type == AVDTP_MSG_TYPE_COMMAND) {
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+		struct btd_service *service;
+
+		service = btd_device_get_service(session->device, A2DP_SINK_UUID);
+		if (service != NULL) {
+			DBG("A2dp state %d", btd_service_get_state(
+					btd_device_get_service(session->device, A2DP_SINK_UUID)));
+
+			if (btd_service_get_state(btd_device_get_service(session->device,
+					A2DP_SINK_UUID)) == BTD_SERVICE_STATE_DISCONNECTING) {
+				DBG("avdtp:%p , disconnect timer is going on", session);
+				return FALSE;
+			}
+		}
+#endif
 		if (!avdtp_parse_cmd(session, session->in.transaction,
 					session->in.signal_id,
 					session->in.buf,
@@ -2274,6 +2749,10 @@ static void avdtp_connect_cb(GIOChannel *chan, GError *err, gpointer user_data)
 	struct avdtp *session = user_data;
 	char address[18];
 	int err_no = EIO;
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+	struct btd_adapter *adapter;
+	adapter = avdtp_get_adapter(session);
+#endif
 
 	if (err) {
 		err_no = err->code;
@@ -2322,8 +2801,16 @@ static void avdtp_connect_cb(GIOChannel *chan, GError *err, gpointer user_data)
 						(GIOFunc) session_cb, session,
 						NULL);
 
-		if (session->stream_setup)
+		if (session->stream_setup) {
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+			if (btd_adapter_get_a2dp_role(adapter) == BLUETOOTH_A2DP_SINK_ROLE)
+				set_disconnect_timer_for_sink(session, FALSE);
+			else
+				set_disconnect_timer(session);
+#else
 			set_disconnect_timer(session);
+#endif
+		}
 	} else if (session->pending_open)
 		handle_transport_connect(session, chan, session->imtu,
 								session->omtu);
@@ -2377,6 +2864,8 @@ struct avdtp *avdtp_new(GIOChannel *chan, struct btd_device *device,
 	 * with respect to the disconnect timer */
 	session->stream_setup = TRUE;
 
+	session->dc_timeout = DISCONNECT_TIMEOUT;
+
 	avdtp_connect_cb(chan, NULL, session);
 
 	return session;
@@ -2387,9 +2876,35 @@ static GIOChannel *l2cap_connect(struct avdtp *session)
 	GError *err = NULL;
 	GIOChannel *io;
 	const bdaddr_t *src;
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+	struct btd_adapter *adapter;
+	adapter = avdtp_get_adapter(session);
+#endif
 
 	src = btd_adapter_get_address(device_get_adapter(session->device));
 
+#if defined TIZEN_FEATURE_BLUEZ_MODIFY
+	if (btd_adapter_get_a2dp_role(adapter) == BLUETOOTH_A2DP_SINK_ROLE) {
+		io = bt_io_connect(avdtp_connect_cb, session,
+				NULL, &err,
+				BT_IO_OPT_SOURCE_BDADDR, src,
+				BT_IO_OPT_DEST_BDADDR,
+				device_get_address(session->device),
+				BT_IO_OPT_PSM, AVDTP_PSM,
+				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
+				BT_IO_OPT_IMTU, 895,
+				BT_IO_OPT_INVALID);
+	} else {
+		io = bt_io_connect(avdtp_connect_cb, session,
+				NULL, &err,
+				BT_IO_OPT_SOURCE_BDADDR, src,
+				BT_IO_OPT_DEST_BDADDR,
+				device_get_address(session->device),
+				BT_IO_OPT_PSM, AVDTP_PSM,
+				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
+				BT_IO_OPT_INVALID);
+	}
+#else
 	io = bt_io_connect(avdtp_connect_cb, session,
 				NULL, &err,
 				BT_IO_OPT_SOURCE_BDADDR, src,
@@ -2398,6 +2913,8 @@ static GIOChannel *l2cap_connect(struct avdtp *session)
 				BT_IO_OPT_PSM, AVDTP_PSM,
 				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 				BT_IO_OPT_INVALID);
+#endif
+
 	if (!io) {
 		error("%s", err->message);
 		g_error_free(err);
@@ -2638,12 +3155,15 @@ static gboolean avdtp_discover_resp(struct avdtp *session,
 		stream = find_stream_by_rseid(session, resp->seps[i].seid);
 
 		sep = find_remote_sep(session->seps, resp->seps[i].seid);
-		if (!sep) {
-			if (resp->seps[i].inuse && !stream)
-				continue;
-			sep = g_new0(struct avdtp_remote_sep, 1);
-			session->seps = g_slist_append(session->seps, sep);
-		}
+		if (sep && sep->type == resp->seps[i].type &&
+				sep->media_type == resp->seps[i].media_type)
+			continue;
+
+		if (resp->seps[i].inuse && !stream)
+			continue;
+
+		sep = g_new0(struct avdtp_remote_sep, 1);
+		session->seps = g_slist_append(session->seps, sep);
 
 		sep->stream = stream;
 		sep->seid = resp->seps[i].seid;
@@ -2793,6 +3313,12 @@ static gboolean avdtp_abort_resp(struct avdtp *session,
 					struct seid_rej *resp, int size)
 {
 	struct avdtp_local_sep *sep = stream->lsep;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	if (!sep) {
+		error("Error in getting sep");
+		return FALSE;
+	}
+#endif
 
 	avdtp_sep_set_state(session, sep, AVDTP_STATE_ABORTING);
 
@@ -3161,9 +3687,24 @@ static int process_queue(struct avdtp *session)
 	return send_req(session, FALSE, req);
 }
 
+uint8_t avdtp_get_seid(struct avdtp_remote_sep *sep)
+{
+	return sep->seid;
+}
+
+uint8_t avdtp_get_type(struct avdtp_remote_sep *sep)
+{
+	return sep->type;
+}
+
 struct avdtp_service_capability *avdtp_get_codec(struct avdtp_remote_sep *sep)
 {
 	return sep->codec;
+}
+
+bool avdtp_get_delay_reporting(struct avdtp_remote_sep *sep)
+{
+	return sep->delay_reporting;
 }
 
 struct avdtp_service_capability *avdtp_service_cap_new(uint8_t category,
@@ -3180,6 +3721,41 @@ struct avdtp_service_capability *avdtp_service_cap_new(uint8_t category,
 	memcpy(cap->data, data, length);
 
 	return cap;
+}
+
+struct avdtp_remote_sep *avdtp_register_remote_sep(struct avdtp *session,
+							uint8_t seid,
+							uint8_t type,
+							GSList *caps,
+							bool delay_reporting)
+{
+	struct avdtp_remote_sep *sep;
+	GSList *l;
+
+	sep = find_remote_sep(session->seps, seid);
+	if (sep)
+		return sep;
+
+	sep = g_new0(struct avdtp_remote_sep, 1);
+	session->seps = g_slist_append(session->seps, sep);
+	sep->seid = seid;
+	sep->type = type;
+	sep->media_type = AVDTP_MEDIA_TYPE_AUDIO;
+	sep->caps = caps;
+	sep->delay_reporting = delay_reporting;
+
+	for (l = caps; l; l = g_slist_next(l)) {
+		struct avdtp_service_capability *cap = l->data;
+
+		if (cap->category == AVDTP_MEDIA_CODEC)
+			sep->codec = cap;
+	}
+
+	DBG("seid %d type %d media %d delay_reporting %s", sep->seid, sep->type,
+				sep->media_type,
+				sep->delay_reporting ? "true" : "false");
+
+	return sep;
 }
 
 static gboolean process_discover(gpointer data)
@@ -3415,11 +3991,45 @@ int avdtp_start(struct avdtp *session, struct avdtp_stream *stream)
 		/* If timer already active wait it */
 		if (stream->start_timer)
 			return 0;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+		else {
+			char address[18];
+			uint32_t timeout_sec = START_TIMEOUT;
 
+			ba2str(device_get_address(session->device), address);
+			/* For Bose headset (Bose AE2w) 2 seconds timeout is required to avoid AVDTP ABORT_CMD */
+			if (!strncasecmp(address, "00:0C:8A", 8) ||
+				!strncasecmp(address, "08:DF:1F", 8))
+				timeout_sec = 2;
+			/* For Gear Circle, HS3000 headset, this headset doesn't initiate start command and
+			 * when we add timer for 1 second so idle may trigger callback after 1.2 sec or
+			 * 1.5 sec. So, don't timer for this headset.*/
+			if (!strncasecmp(address, "10:92:66", 8) ||
+				!strncasecmp(address, "A8:9F:BA", 8) ||
+				!strncasecmp(address, "00:26:B4", 8)) {
+				start_timeout(stream);
+				return 0;
+			}
+			 /* Here we can't use Mac address as there are changing so check for name */
+			char name[10];
+			device_get_name(session->device, name, sizeof(name));
+			DBG("name : %s", name);
+			if (g_str_equal(name, "HS3000")) {
+				start_timeout(stream);
+				return 0;
+			}
+
+			stream->start_timer = g_timeout_add_seconds(timeout_sec,
+									start_timeout,
+									stream);
+			return 0;
+		}
+#else
 		stream->start_timer = g_timeout_add_seconds(START_TIMEOUT,
 								start_timeout,
 								stream);
 		return 0;
+#endif
 	}
 
 	if (stream->close_int == TRUE) {
@@ -3468,8 +4078,10 @@ int avdtp_close(struct avdtp *session, struct avdtp_stream *stream,
 
 	ret = send_request(session, FALSE, stream, AVDTP_CLOSE,
 							&req, sizeof(req));
-	if (ret == 0)
+	if (ret == 0) {
 		stream->close_int = TRUE;
+		session->dc_timeout = 0;
+	}
 
 	return ret;
 }
@@ -3517,8 +4129,10 @@ int avdtp_abort(struct avdtp *session, struct avdtp_stream *stream)
 
 	ret = send_request(session, TRUE, stream, AVDTP_ABORT,
 							&req, sizeof(req));
-	if (ret == 0)
+	if (ret == 0) {
 		stream->abort_int = TRUE;
+		session->dc_timeout = 0;
+	}
 
 	return ret;
 }
@@ -3547,6 +4161,19 @@ int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
 	return send_request(session, TRUE, stream, AVDTP_DELAY_REPORT,
 							&req, sizeof(req));
 }
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+int delay_report_req(uint16_t delay)
+{
+	if (!configured_session)
+		return -EINVAL;
+
+	if (!configured_stream)
+		return -EINVAL;
+
+	return avdtp_delay_report(configured_session, configured_stream, delay);
+}
+#endif
 
 struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps, uint8_t type,
 						uint8_t media_type,
@@ -3651,6 +4278,11 @@ const char *avdtp_strerror(struct avdtp_error *err)
 avdtp_state_t avdtp_sep_get_state(struct avdtp_local_sep *sep)
 {
 	return sep->state;
+}
+
+uint8_t avdtp_sep_get_seid(struct avdtp_local_sep *sep)
+{
+	return sep->info.seid;
 }
 
 struct btd_adapter *avdtp_get_adapter(struct avdtp *session)

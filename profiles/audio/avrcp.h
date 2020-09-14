@@ -96,6 +96,9 @@ struct avrcp_player_cb {
 	const char *(*get_name) (void *user_data);
 	void (*set_volume) (uint8_t volume, struct btd_device *dev,
 							void *user_data);
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	uint8_t (*get_volume) (struct btd_device *dev, void *user_data);
+#endif
 	bool (*play) (void *user_data);
 	bool (*stop) (void *user_data);
 	bool (*pause) (void *user_data);
@@ -104,6 +107,14 @@ struct avrcp_player_cb {
 };
 
 int avrcp_set_volume(struct btd_device *dev, uint8_t volume, bool notify);
+
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+int avrcp_get_target_volume(struct btd_device *dev, uint8_t* volume);
+#endif
+
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+int avrcp_pause(struct btd_device *dev);
+#endif
 
 struct avrcp_player *avrcp_register_player(struct btd_adapter *adapter,
 						struct avrcp_player_cb *cb,

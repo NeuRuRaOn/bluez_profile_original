@@ -25,6 +25,7 @@
 struct media_transport;
 
 struct media_transport *media_transport_create(struct btd_device *device,
+						const char *remote_endpoint,
 						uint8_t *configuration,
 						size_t size, void *data);
 
@@ -42,3 +43,7 @@ void transport_get_properties(struct media_transport *transport,
 uint8_t media_transport_get_device_volume(struct btd_device *dev);
 void media_transport_update_device_volume(struct btd_device *dev,
 								uint8_t volume);
+
+#if defined(TIZEN_FEATURE_BLUEZ_MODIFY) && defined(TIZEN_FEATURE_BLUEZ_A2DP_MULTISTREAM)
+void media_transport_set_stream_status(struct btd_device *device, bool pause);
+#endif
