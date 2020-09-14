@@ -58,6 +58,9 @@ struct input_server {
 	GIOChannel *ctrl;
 	GIOChannel *intr;
 	struct confirm_data *confirm;
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+	char *role;
+#endif
 };
 
 static int server_cmp(gconstpointer s, gconstpointer user_data)
@@ -177,7 +180,14 @@ static void connect_event_cb(GIOChannel *chan, GError *err, gpointer data)
 		sixaxis_browse_sdp(&src, &dst, chan, psm);
 		return;
 	}
-
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+	if (ret == -ENOENT) {
+		DBG("Connection request for device role");
+		ret = input_device_role_set_channel(&src, &dst, psm, chan);
+		if (ret == 0)
+			return;
+	}
+#endif
 	error("Refusing input device connect: %s (%d)", strerror(-ret), -ret);
 
 	/* Send unplug virtual cable to unknown devices */
@@ -203,8 +213,15 @@ static void auth_callback(DBusError *derr, void *user_data)
 	}
 
 	if (!input_device_exists(&server->src, &confirm->dst) &&
-				!dev_is_sixaxis(&server->src, &confirm->dst))
+				!dev_is_sixaxis(&server->src, &confirm->dst)) {
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+		if (!input_device_role_exists(&server->src, &confirm->dst)) {
+			return;
+		}
+#else
 		return;
+#endif
+	}
 
 	if (!bt_io_accept(confirm->io, connect_event_cb, server, NULL, &err)) {
 		error("bt_io_accept: %s", err->message);
@@ -255,8 +272,15 @@ static void confirm_event_cb(GIOChannel *chan, gpointer user_data)
 	}
 
 	if (!input_device_exists(&src, &dst) && !dev_is_sixaxis(&src, &dst)) {
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+		if (!input_device_role_exists(&src, &dst)) {
+			error("Refusing connection from %s: unknown device", addr);
+			goto drop;
+		}
+#else
 		error("Refusing connection from %s: unknown device", addr);
 		goto drop;
+#endif
 	}
 
 	server->confirm = g_new0(struct confirm_data, 1);
@@ -291,7 +315,11 @@ int server_start(const bdaddr_t *src)
 				server, NULL, &err,
 				BT_IO_OPT_SOURCE_BDADDR, src,
 				BT_IO_OPT_PSM, L2CAP_PSM_HIDP_CTRL,
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
+#else
 				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+#endif
 				BT_IO_OPT_INVALID);
 	if (!server->ctrl) {
 		error("Failed to listen on control channel");
@@ -304,7 +332,11 @@ int server_start(const bdaddr_t *src)
 				server, NULL, &err,
 				BT_IO_OPT_SOURCE_BDADDR, src,
 				BT_IO_OPT_PSM, L2CAP_PSM_HIDP_INTR,
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
+#else
 				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+#endif
 				BT_IO_OPT_INVALID);
 	if (!server->intr) {
 		error("Failed to listen on interrupt channel");
@@ -339,3 +371,59 @@ void server_stop(const bdaddr_t *src)
 	servers = g_slist_remove(servers, server);
 	g_free(server);
 }
+
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+int server_device_start(const bdaddr_t *src)
+{
+	struct input_server *server;
+	GError *err = NULL;
+
+	server = g_new0(struct input_server, 1);
+	bacpy(&server->src, src);
+
+	server->ctrl = bt_io_listen(connect_event_cb, NULL,
+				server, NULL, &err,
+				BT_IO_OPT_SOURCE_BDADDR, src,
+				BT_IO_OPT_PSM, L2CAP_PSM_HIDP_CTRL,
+				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
+				BT_IO_OPT_INVALID);
+	if (!server->ctrl) {
+		error("Failed to listen on control channel");
+	}
+
+	server->intr = bt_io_listen(NULL, confirm_event_cb,
+				server, NULL, &err,
+				BT_IO_OPT_SOURCE_BDADDR, src,
+				BT_IO_OPT_PSM, L2CAP_PSM_HIDP_INTR,
+				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
+				BT_IO_OPT_INVALID);
+	if (!server->intr) {
+		error("Failed to listen on interrupt channel");
+	}
+	server->role = strdup("device");
+	servers = g_slist_append(servers, server);
+
+	return 0;
+}
+
+void server_device_stop(const bdaddr_t *src)
+{
+	struct input_server *server;
+	GSList *l;
+
+	l = g_slist_find_custom(servers, src, server_cmp);
+	if (!l)
+		return;
+
+	server = l->data;
+
+	g_io_channel_shutdown(server->intr, TRUE, NULL);
+	g_io_channel_unref(server->intr);
+
+	g_io_channel_shutdown(server->ctrl, TRUE, NULL);
+	g_io_channel_unref(server->ctrl);
+	g_free(server->role);
+	servers = g_slist_remove(servers, server);
+	g_free(server);
+}
+#endif

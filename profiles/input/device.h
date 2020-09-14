@@ -33,6 +33,15 @@ void input_enable_userspace_hid(bool state);
 int input_device_register(struct btd_service *service);
 void input_device_unregister(struct btd_service *service);
 
+#ifdef TIZEN_BT_HID_DEVICE_ENABLE
+int input_device_role_register(struct btd_service *service);
+void input_device_role_unregister(struct btd_service *service);
+bool input_device_role_exists(const bdaddr_t *src, const bdaddr_t *dst);
+int input_device_role_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
+							GIOChannel *io);
+int input_device_role_close_channels(const bdaddr_t *src, const bdaddr_t *dst);
+#endif
+
 bool input_device_exists(const bdaddr_t *src, const bdaddr_t *dst);
 int input_device_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
 							GIOChannel *io);

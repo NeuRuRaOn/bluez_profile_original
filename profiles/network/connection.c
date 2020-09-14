@@ -123,12 +123,14 @@ static void bnep_disconn_cb(gpointer data)
 	DBusConnection *conn = btd_get_dbus_connection();
 	const char *path = device_get_path(nc->peer->device);
 
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	g_dbus_emit_property_changed(conn, path,
 					NETWORK_PEER_INTERFACE, "Connected");
 	g_dbus_emit_property_changed(conn, path,
 					NETWORK_PEER_INTERFACE, "Interface");
 	g_dbus_emit_property_changed(conn, path,
 					NETWORK_PEER_INTERFACE, "UUID");
+#endif
 	device_remove_disconnect_watch(nc->peer->device, nc->dc_id);
 	nc->dc_id = 0;
 
@@ -137,6 +139,14 @@ static void bnep_disconn_cb(gpointer data)
 	info("%s disconnected", nc->dev);
 
 	nc->state = DISCONNECTED;
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	g_dbus_emit_property_changed(conn, path,
+					NETWORK_PEER_INTERFACE, "Connected");
+	g_dbus_emit_property_changed(conn, path,
+					NETWORK_PEER_INTERFACE, "Interface");
+	g_dbus_emit_property_changed(conn, path,
+					NETWORK_PEER_INTERFACE, "UUID");
+#endif
 	memset(nc->dev, 0, sizeof(nc->dev));
 	strncpy(nc->dev, BNEP_INTERFACE, 16);
 	nc->dev[15] = '\0';
@@ -178,10 +188,19 @@ static void cancel_connection(struct network_conn *nc, int err)
 
 	if (nc->state == CONNECTED)
 		bnep_disconnect(nc->session);
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	else {
+		/* In error case we need to free session */
+		DBG("Cancel Connection state %d", nc->state);
+		bnep_free(nc->session);
+		nc->session = NULL;
+	}
+#endif
 
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	bnep_free(nc->session);
 	nc->session = NULL;
-
+#endif
 	nc->state = DISCONNECTED;
 }
 
@@ -226,6 +245,9 @@ static void bnep_conn_cb(char *iface, int err, void *data)
 	conn = btd_get_dbus_connection();
 	path = device_get_path(nc->peer->device);
 
+#ifdef TIZEN_FEATURE_BLUEZ_MODIFY
+	nc->state = CONNECTED;
+#endif
 	g_dbus_emit_property_changed(conn, path,
 					NETWORK_PEER_INTERFACE, "Connected");
 	g_dbus_emit_property_changed(conn, path,
@@ -233,7 +255,9 @@ static void bnep_conn_cb(char *iface, int err, void *data)
 	g_dbus_emit_property_changed(conn, path,
 					NETWORK_PEER_INTERFACE, "UUID");
 
+#ifndef TIZEN_FEATURE_BLUEZ_MODIFY
 	nc->state = CONNECTED;
+#endif
 	nc->dc_id = device_add_disconnect_watch(nc->peer->device, disconnect_cb,
 								nc, NULL);
 
